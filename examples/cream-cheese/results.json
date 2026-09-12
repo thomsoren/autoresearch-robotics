@@ -1,0 +1,109 @@
+{
+  "suite": "libero_goal",
+  "task_id": 6,
+  "actor": "claude-fable-5-1",
+  "max_steps": 1800,
+  "max_api_requests": 24,
+  "timeout_seconds": 900,
+  "observation_mode": "calibrated_rgbd",
+  "evaluation_split": "development",
+  "conditions": [
+    {
+      "condition": "baseline",
+      "successes": 1,
+      "episodes": 3,
+      "steps": 3366,
+      "api_requests": 61,
+      "policy_errors": 0,
+      "states": [
+        {
+          "init_state_id": 0,
+          "success": true,
+          "steps": 980,
+          "api_requests_attempted": 15
+        },
+        {
+          "init_state_id": 1,
+          "success": false,
+          "steps": 1201,
+          "api_requests_attempted": 24
+        },
+        {
+          "init_state_id": 2,
+          "success": false,
+          "steps": 1185,
+          "api_requests_attempted": 22
+        }
+      ]
+    },
+    {
+      "condition": "revision1",
+      "successes": 1,
+      "episodes": 3,
+      "steps": 2624,
+      "api_requests": 49,
+      "policy_errors": 0,
+      "states": [
+        {
+          "init_state_id": 0,
+          "success": false,
+          "steps": 1193,
+          "api_requests_attempted": 20
+        },
+        {
+          "init_state_id": 1,
+          "success": false,
+          "steps": 606,
+          "api_requests_attempted": 10
+        },
+        {
+          "init_state_id": 2,
+          "success": true,
+          "steps": 825,
+          "api_requests_attempted": 19
+        }
+      ]
+    },
+    {
+      "condition": "revision2",
+      "successes": 2,
+      "episodes": 3,
+      "steps": 2094,
+      "api_requests": 47,
+      "policy_errors": 0,
+      "states": [
+        {
+          "init_state_id": 0,
+          "success": true,
+          "steps": 615,
+          "api_requests_attempted": 13
+        },
+        {
+          "init_state_id": 1,
+          "success": false,
+          "steps": 914,
+          "api_requests_attempted": 24
+        },
+        {
+          "init_state_id": 2,
+          "success": true,
+          "steps": 565,
+          "api_requests_attempted": 10
+        }
+      ]
+    }
+  ],
+  "decisions": [
+    "reject",
+    "keep"
+  ],
+  "limitations": [
+    "Three development starting states only. No held-out or cross-task evaluation.",
+    "This is a compact recorded result, not a complete evaluator batch. Full local traces are in ignored runs/."
+  ],
+  "web_demo": {
+    "repository": "https://github.com/thomsoren/lito",
+    "branch": "ludvig/autoresearch-demo-page",
+    "command": "bun run dev:demo"
+  }
+}

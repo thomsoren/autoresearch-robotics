@@ -52,23 +52,40 @@ flowchart LR
 The Lift study uses Inspect Robots' native summary and memory-loading flow. The separate Python coordinator in `evaluation/loop.py` automates diagnosis, candidate generation, replay and keep/reject selection for LIBERO. Its stove candidates all tied at zero successes and were rejected. The successful Lift study and the automatic stove loop are separate experiments.
 
 
-## Ownership and layout
+## Current integrated architecture
+
+The LIBERO executor combines measured pose control and calibrated RGB-D feedback
+with reusable operating-guide revisions, regression evidence and a separate frozen
+evaluation command.
+Start with [current implementation and commands](docs/IMPLEMENTATION.md),
+[architecture](docs/ARCHITECTURE.md), and [executor contract](execute/README.md).
+Gripper-tip testing is paused. Historical handoff documents describe the original
+team split; the integrated implementation is documented above.
+
+For the hackathon presentation, see the [recorded result and portable demo](examples/cream-cheese/README.md).
+The selected guide and compact measured outcomes are included here; the Lito demo
+branch bundles its videos and runs with `bun run dev:demo` without the robot runtime.
+In this separate LIBERO cream-cheese development experiment, the fixed Fable actor
+scored **1/3 without a guide, 1/3 with revision 1, and 2/3 with revision 2**.
+The first revision was rejected and the second retained. These three starting
+states do not establish held-out or cross-task generalization.
+
+## Repository layout
 
 ```text
-simulation/     Thomas: MuJoCo/LIBERO setup, robot tools and tests
+simulation/     MuJoCo/LIBERO setup, robot tools and tests
 evaluation/     benchmark runner, tests and improvement-agent instructions
 docs/           setup guide and agreed design
-harness/        reserved for Laksiya; she creates and owns this folder
-execute/        isolated Inspect Robots agent experiment (Opus 5)
-skills/         accepted Markdown skills, created when the first skill is ready
+harness/        separate team harness integration
+execute/        Fable 5.1 actor, pose control and calibrated perception
+examples/       selected development guide and compact recorded outcomes
 runs/           generated evidence and candidate skills; ignored
 pyproject.toml  shared uv environment
 uv.lock         pinned dependencies
 ```
 
-See [team handoff and individual tasks](docs/HANDOFF.md): Ludvig owns robot-control
-reliability in `execute/`, Laksiya owns improvement-agent quality, and Thomas owns
-simulation and loop integration. Existing `harness/` work stays separate.
+See [historical team handoff](docs/HANDOFF.md) for the original task assignments.
+Existing `harness/` work stays separate.
 Evaluation and improvement work stays in `evaluation/` and consumes executor
 artifacts. `evaluate.py` runs benchmarks; `improve.py` uses the Claude Agent SDK
 to inspect evidence and propose a Markdown candidate in one agent session.
@@ -79,8 +96,8 @@ It records the selected frozen skill path without overwriting active skills.
 See [loop commands and budgets](docs/SETUP.md#automatic-inspect-skill-loop).
 Inspect Robots provides optional reports from completed batches, including
 original videos/stills, without taking over the executor.
-The separately requested [Inspect agent experiment](execute/README.md) does use
-its stock executor against a limited XYZ/gripper LIBERO adapter.
+The [Inspect executor](execute/README.md) uses bounded pose control by default;
+the legacy XYZ/gripper mode remains available for comparison.
 
 ## Quick start
 
@@ -110,7 +127,7 @@ See [setup and robot API](docs/SETUP.md), [agreed design](docs/DESIGN.md), and
 ```bash
 uv run -m evaluation.evaluate --states 0 1 --max-steps 20
 uv run --group evaluation -m evaluation.evaluate --report-existing runs/my-completed-batch
-uv run --group evaluation pytest -q
+uv run --locked --group evaluation --group execute pytest -q
 docker build -f simulation/Dockerfile -t autoresearch-robotics:local .
 mkdir -p runs
 docker run --rm -v "$PWD/runs:/app/runs" autoresearch-robotics:local

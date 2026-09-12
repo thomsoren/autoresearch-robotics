@@ -191,6 +191,10 @@ def load_batch(run):
             raise ValueError("Episode steps must be a nonnegative integer")
         if any(row.get(key) != manifest[key] for key in ("policy", "skill_hash")):
             raise ValueError("Episode policy/skill hash differs from the batch manifest")
+        if "evaluation_split" in manifest and row.get("evaluation_split") != manifest[
+            "evaluation_split"
+        ]:
+            raise ValueError("Episode evaluation split differs from the batch manifest")
         path = run / f"state-{row['init_state_id']:03d}" / "result.json"
         if json.loads(path.read_text()) != row:
             raise ValueError("Episode result differs from the batch results")
@@ -226,9 +230,21 @@ def compare_runs(baseline, candidate, output=None):
         raise ValueError(
             "Skill selection requires development states [0, 1, 2]; held-out states cannot select skills"
         )
+    if old.get("evaluation_split") not in (None, "development") or new.get(
+        "evaluation_split"
+    ) not in (None, "development"):
+        raise ValueError("Skill selection accepts development batches only")
     reasons = []
-    for key in ("policy", "suite", "task_id", "seed", "max_steps", "observation_mode"):
-        if old[key] != new[key]:
+    for key in (
+        "policy",
+        "suite",
+        "task_id",
+        "seed",
+        "max_steps",
+        "observation_mode",
+        "control",
+    ):
+        if old.get(key) != new.get(key):
             reasons.append(f"Different {key}")
     if old.get("episode_seeds") != new.get("episode_seeds"):
         reasons.append("Different episode_seeds")

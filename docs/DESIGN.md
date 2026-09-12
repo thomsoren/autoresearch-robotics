@@ -1,3 +1,7 @@
+> Historical MVP design. The integrated reusable operating-guide design is in
+> [ARCHITECTURE.md](ARCHITECTURE.md), with current commands and evidence in
+> [IMPLEMENTATION.md](IMPLEMENTATION.md).
+
 # Robotics skill improvement: agreed design
 
 ## Objective and ownership

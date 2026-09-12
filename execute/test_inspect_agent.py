@@ -12,29 +12,49 @@ from inspect_robots import Action, Observation, Scene, Task, eval, success_at_en
 from inspect_robots.mock import CubePickEmbodiment  # noqa: E402
 from inspect_robots_agent import LLMAgentPolicy  # noqa: E402
 
-from execute.inspect_agent import LiberoEmbodiment, RequestBudget  # noqa: E402
+from execute.inspect_agent import (  # noqa: E402
+    LiberoEmbodiment,
+    RequestBudget,
+    output_token_limit,
+)
 
 
 class FakeRobot:
     gripper_command = -1.0
+    success = False
+    max_steps = 200
 
-    def __init__(self):
+    def __init__(self, output=None):
         self.calls = []
+        self.output = output
+        self.steps = 0
+        self.position = np.zeros(3)
 
-    def step(self, action):
+    @property
+    def done(self):
+        return self.steps >= self.max_steps
+
+    def pose(self):
+        return self.position.copy(), np.eye(3)
+
+    def _advance(self, action):
         self.calls.append(action)
-        self.gripper_command = action[-1]
-        return {"success": False, "done": False}
+        self.position += np.array(action[:3]) * 0.05 * 0.25
+        self.steps += 1
+
+    def observe(self):
+        return {"success": False, "done": self.done}
 
 
 def test_physical_displacements_gripper_hold_and_fixed_rotation(tmp_path):
-    body = LiberoEmbodiment(tmp_path)
-    body.robot = FakeRobot()
+    body = LiberoEmbodiment(tmp_path, control="xyz")
+    body.robot = FakeRobot(tmp_path)
     body.observation = lambda raw: Observation()
     result = body.step(Action(np.array([0.01, -0.01, 0.005, 0.2])))
-    np.testing.assert_allclose(body.robot.calls[-1], [0.2, -0.2, 0.1, 0, 0, 0, 1])
+    np.testing.assert_allclose(body.robot.position, [0.01, -0.01, 0.005], atol=0.001)
+    assert len(body.robot.calls) >= 15
     body.step(Action(np.zeros(4)))
-    assert body.robot.calls[-1][-1] == 1  # Omitted grip retains closed command.
+    assert body.robot.calls[-1][-1] == 1
     body.step(Action(np.array([0, 0, 0, -0.1])))
     assert body.robot.calls[-1][-1] == -1
     assert result.reward == 0 and not result.terminated
@@ -42,8 +62,8 @@ def test_physical_displacements_gripper_hold_and_fixed_rotation(tmp_path):
 
 @pytest.mark.parametrize("data", [[1, 0, 0, 0], [float("nan"), 0, 0, 0], [0, 0, 0]])
 def test_invalid_action_never_reaches_simulation(tmp_path, data):
-    body = LiberoEmbodiment(tmp_path)
-    body.robot = FakeRobot()
+    body = LiberoEmbodiment(tmp_path, control="xyz")
+    body.robot = FakeRobot(tmp_path)
     with pytest.raises(ValueError):
         body.step(Action(np.array(data)))
     assert body.robot.calls == []
@@ -54,6 +74,7 @@ def test_stock_opus_fast_agent_done_cannot_declare_success(tmp_path):
         assert str(request.url) == "https://api.anthropic.com/v1/messages"
         body = json.loads(request.content)
         assert body["model"] == "claude-opus-5"
+        assert body["max_tokens"] == 1024
         assert body["speed"] == "fast"
         assert "anthropic-beta" in request.headers
         return httpx.Response(
@@ -81,7 +102,7 @@ def test_stock_opus_fast_agent_done_cannot_declare_success(tmp_path):
         model="claude-opus-5",
         wire="messages",
         speed="fast",
-        max_output_tokens=1024,
+        max_output_tokens=output_token_limit("claude-opus-5"),
         max_llm_calls=1,
         effort="low",
         wire_capture=False,
@@ -145,6 +166,7 @@ def test_fable_preserves_image_history_and_thinking_prefixes(tmp_path):
     def respond(request):
         body = json.loads(request.content)
         assert body["model"] == "claude-fable-5-1"
+        assert body["max_tokens"] == 8192
         assert body["thinking"] == {"type": "adaptive"}
         assert body.get("tool_choice", {}).get("type", "auto") == "auto"
         assert "speed" not in body
@@ -188,7 +210,7 @@ def test_fable_preserves_image_history_and_thinking_prefixes(tmp_path):
         wire="messages",
         speed=None,
         effort="low",
-        max_output_tokens=1024,
+        max_output_tokens=output_token_limit("claude-fable-5-1"),
         max_llm_calls=4,
         images="always",
         image_horizon=image_horizon("claude-fable-5-1"),
@@ -198,7 +220,7 @@ def test_fable_preserves_image_history_and_thinking_prefixes(tmp_path):
         env={"CLAUDE_API_KEY": "test-only"},
         transport=httpx.MockTransport(respond),
     )
-    policy.bind(LiberoEmbodiment(tmp_path).info)
+    policy.bind(LiberoEmbodiment(tmp_path, control="xyz").info)
     policy.reset(Scene(id="test", instruction="open drawer"))
     for i in range(4):
         policy.act(
@@ -208,3 +230,43 @@ def test_fable_preserves_image_history_and_thinking_prefixes(tmp_path):
             )
         )
     assert len(requests) == 4
+
+
+def test_transport_failure_is_counted_and_logged_without_exception_secrets(tmp_path):
+    budget = RequestBudget(tmp_path, 1, time.monotonic() + 120)
+    budget.inner.close()
+
+    def respond(request):
+        assert request.extensions["timeout"]["read"] > 90
+        raise httpx.ReadTimeout("sensitive-request-data", request=request)
+
+    budget.inner = httpx.MockTransport(respond)
+    with httpx.Client(transport=budget) as client:
+        with pytest.raises(httpx.ReadTimeout):
+            client.post("https://api.anthropic.com/v1/messages", json={"model": "claude-fable-5-1"})
+    record = json.loads((tmp_path / "requests.jsonl").read_text())
+    assert record["request"] == budget.count == 1
+    assert record["error_type"] == "ReadTimeout"
+    assert record["http_status"] is None
+    assert "sensitive-request-data" not in str(record)
+
+
+def test_refusal_records_only_public_text_and_preserves_response(tmp_path):
+    budget = RequestBudget(tmp_path, 1, time.monotonic() + 120)
+    budget.inner.close()
+    payload = {
+        "model": "claude-fable-5-1",
+        "stop_reason": "refusal",
+        "content": [
+            {"type": "thinking", "thinking": "private internal text", "signature": "private-signature"},
+            {"type": "text", "text": "Public refusal explanation."},
+        ],
+    }
+    budget.inner = httpx.MockTransport(lambda request: httpx.Response(200, json=payload))
+    with httpx.Client(transport=budget) as client:
+        response = client.post("https://api.anthropic.com/v1/messages", json={"model": "claude-fable-5-1"})
+    assert response.json() == payload
+    record = json.loads((tmp_path / "requests.jsonl").read_text())
+    assert record["stop_reason"] == "refusal"
+    assert record["public_text"] == ["Public refusal explanation."]
+    assert "private" not in str(record)

@@ -1,3 +1,7 @@
+> The user authorized end-to-end implementation across the earlier ownership
+> boundaries on the `ludvig/skill-architecture` branch. For its current state,
+> see [IMPLEMENTATION.md](IMPLEMENTATION.md). The original handoff follows.
+
 # Team handoff
 
 The MVP is **a fixed robot executor whose Markdown skills improve LIBERO success

@@ -32,6 +32,9 @@ from dotenv import dotenv_values
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
+NUMBER = r"[+\-\N{MINUS SIGN}]?(?:\d+(?:\.\d*)?|\.\d+)"
+COORDINATE_TRIPLET = re.compile(rf"[\[(]\s*{NUMBER}\s*,\s*{NUMBER}\s*,\s*{NUMBER}\s*[\])]")
+NUMERIC_AXIS_ASSIGNMENT = re.compile(rf"\b[xyz]\s*(?:=|:|≈|~)\s*{NUMBER}\b", re.IGNORECASE)
 SCHEMA = {
     "type": "object",
     "properties": {
@@ -40,7 +43,7 @@ SCHEMA = {
         "evidence": {"type": "array", "items": {"type": "string"}},
         "uncertainty": {"type": "array", "items": {"type": "string"}},
         "prediction": {"type": "string"},
-        "candidate_name": {"type": "string"},
+        "candidate_name": {"type": "string", "enum": ["", "robot_operating_guide"]},
         "candidate_markdown": {"type": "string"},
     },
     "required": [
@@ -66,34 +69,93 @@ def api_key(root=ROOT):
     return key.strip()
 
 
-def prepare_evidence(episode, output, kind, skills=None, trace=None, context=None):
+def prepare_evidence(
+    episode,
+    output,
+    kind,
+    skills=None,
+    trace=None,
+    context=None,
+    regression=None,
+    incumbent=None,
+):
     episode, output = Path(episode).resolve(), Path(output).resolve()
     if kind not in ("smoke", "agent"):
         raise ValueError("kind must be smoke or agent")
     result = json.loads((episode / "result.json").read_text())
     if type(result.get("init_state_id")) is not int or result["init_state_id"] not in (0, 1, 2):
         raise ValueError("Only development initial states 0, 1, 2 may enter improvement")
+    if result.get("evaluation_split", "development") != "development":
+        raise ValueError("Only the development split may enter improvement")
     if type(result.get("success")) is not bool:
         raise ValueError("Episode result must contain a boolean benchmark success")
     sources = [
         (p.name, p)
         for p in episode.iterdir()
-        if p.name in ("episode.json", "result.json", "actions.jsonl", "episode.mp4")
+        if p.name
+        in ("episode.json", "result.json", "actions.jsonl", "control.jsonl", "episode.mp4")
         or re.fullmatch(r"\d+-(agentview|robot0_eye_in_hand)\.png", p.name)
     ]
+    regression_result = None
+    if regression is not None:
+        regression = Path(regression).resolve()
+        if not regression.is_dir():
+            raise ValueError("Regression must be an existing episode directory")
+        regression_result = json.loads((regression / "result.json").read_text())
+        if type(regression_result.get("init_state_id")) is not int or regression_result[
+            "init_state_id"
+        ] not in (0, 1, 2):
+            raise ValueError("Only development initial states 0, 1, 2 may enter improvement")
+        if regression_result.get("evaluation_split", "development") != "development":
+            raise ValueError("Only the development split may enter improvement")
+        if regression_result.get("success") is not True:
+            raise ValueError("Regression episode must have benchmark success true")
+        if regression_result.get("error") is not None or regression_result.get("policy") == "noop":
+            raise ValueError("Regression must be an error-free agent episode")
+        sources.extend(
+            ("regression/" + p.name, p)
+            for p in regression.iterdir()
+            if p.name
+            in (
+                "episode.json",
+                "result.json",
+                "actions.jsonl",
+                "control.jsonl",
+                "executor-trace.json",
+                "episode.mp4",
+            )
+            or re.fullmatch(r"\d+-(agentview|robot0_eye_in_hand)\.png", p.name)
+        )
     if trace is not None:
         sources.append(("executor-trace.txt", Path(trace).absolute()))
     if context is not None:
         sources.append(("loop-context.json", Path(context).absolute()))
+    tested_skill_files = []
     if skills is not None:
         skills = Path(skills).resolve()
         if not skills.is_dir():
             raise ValueError("Skills must be an existing directory")
-        sources.extend(
-            ("skills/" + p.relative_to(skills).as_posix(), p) for p in sorted(skills.rglob("*.md"))
-        )
-    if output.is_relative_to(episode) or (skills and output.is_relative_to(skills)):
-        raise ValueError("Output must be outside the supplied episode and skills")
+        tested_skill_files = [
+            "skills/" + p.relative_to(skills).as_posix() for p in sorted(skills.rglob("*.md"))
+        ]
+        sources.extend(zip(tested_skill_files, sorted(skills.rglob("*.md"))))
+    incumbent_skill_files = []
+    if incumbent is not None:
+        incumbent = Path(incumbent).resolve()
+        if not incumbent.is_dir():
+            raise ValueError("Incumbent must be an existing directory")
+        incumbent_paths = sorted(incumbent.rglob("*.md"))
+        incumbent_skill_files = [
+            "incumbent/" + p.relative_to(incumbent).as_posix() for p in incumbent_paths
+        ]
+        sources.extend(zip(incumbent_skill_files, incumbent_paths))
+    if (
+        output.is_relative_to(episode)
+        or (regression and output.is_relative_to(regression))
+        or (skills and output.is_relative_to(skills))
+        or (incumbent and output.is_relative_to(incumbent))
+    ):
+        raise ValueError("Output must be outside supplied evidence sources")
     for _, path in sources:
         if path.is_symlink() or not path.is_file():
             raise ValueError("Evidence must be regular files, not symlinks")
@@ -110,10 +172,15 @@ def prepare_evidence(episode, output, kind, skills=None, trace=None, context=Non
         "split": "development",
         "fixture": kind == "smoke" or result.get("policy") == "noop",
         "benchmark": result,
+        "regression": regression_result,
+        "tested_skill_files": tested_skill_files,
+        "incumbent_skill_files": incumbent_skill_files,
         "files_sha256": index,
         "missing_evidence": ["Measured joint displacement/contact forces are not supplied."]
         + ([] if trace else ["No executor trace: tool returns and loaded skills are unknown."])
-        + ([] if skills else ["No incumbent skill snapshot supplied."]),
+        + ([] if skills else ["No tested skill snapshot supplied."])
+        + ([] if regression else ["No successful regression episode supplied."])
+        + ([] if incumbent else ["No selected incumbent snapshot supplied."]),
     }
     (output / "evidence.json").write_text(json.dumps(manifest, indent=2) + "\n")
     return manifest
@@ -161,6 +228,8 @@ def frame_content(output, index, name, frame=0):
 
 
 def validate_report(report, manifest):
+    if report.get("candidate_name") not in ("", "robot_operating_guide"):
+        raise ValueError("A proposal must update robot_operating_guide")
     jsonschema.validate(report, SCHEMA)
     if report["decision"] == "defer":
         if report["candidate_name"] or report["candidate_markdown"]:
@@ -173,6 +242,15 @@ def validate_report(report, manifest):
     if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", report["candidate_name"]):
         raise ValueError("Candidate name must be a lowercase skill identifier")
     markdown = report["candidate_markdown"]
+    if len(markdown) > 16000:
+        raise ValueError("Candidate must be at most 16000 characters")
+    if (
+        "```" in markdown
+        or re.search(r"(?m)^\s*~~~", markdown)
+        or COORDINATE_TRIPLET.search(markdown)
+        or NUMERIC_AXIS_ASSIGNMENT.search(markdown)
+    ):
+        raise ValueError("Candidate must use prose without fenced code or coordinate recipes")
     if not markdown.startswith("---\n") or "\n---\n" not in markdown[4:]:
         raise ValueError("Candidate must have YAML frontmatter")
     metadata = yaml.safe_load(markdown[4:].split("\n---\n", 1)[0])
@@ -320,6 +398,12 @@ def main():
     parser.add_argument("--skills", type=Path)
     parser.add_argument("--trace", type=Path, help="Existing executor text/JSON export (kept raw)")
     parser.add_argument("--context", type=Path, help="Loop selection history, indexed as evidence")
+    parser.add_argument(
+        "--regression", type=Path, help="Successful development episode retained as a reference"
+    )
+    parser.add_argument(
+        "--incumbent", type=Path, help="Selected incumbent skill directory, kept separate"
+    )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--model", default="sonnet")
     parser.add_argument("--max-budget-usd", type=float, default=0.5)
@@ -336,7 +420,14 @@ def main():
     key = None if args.prepare_only else api_key()
     output = (args.output or ROOT / "runs" / f"improve-{time.time_ns()}").resolve()
     manifest = prepare_evidence(
-        args.episode, output, args.kind, args.skills, args.trace, args.context
+        args.episode,
+        output,
+        args.kind,
+        args.skills,
+        args.trace,
+        args.context,
+        regression=args.regression,
+        incumbent=args.incumbent,
     )
     if not args.prepare_only:
         try:

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Autoresearch · Robot Skill Lab</title>
+<link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/" aria-label="Autoresearch home"><span class="mark">↗</span> autoresearch<span class="brand-sub">/ robotics</span></a>
+  <div class="top-controls"><span id="connection" class="connection">Connecting</span><button id="poll-toggle">Pause updates</button><button id="refresh" aria-label="Refresh artifacts">↻ Refresh</button></div>
+</header>
+<main>
+  <section class="intro">
+    <div><p class="eyebrow">ROBOT SKILL LAB <span class="divider">/</span> LIBERO</p><h1>Experience becomes instructions.</h1><p class="subtitle">A fixed robot policy. A revisable operating guide. An objective test.</p></div>
+    <div class="experiment"><label for="iteration">EXPERIMENT VIEW</label><select id="iteration"><option value="">Latest available</option></select><span id="run-name">Reading artifacts…</span></div>
+  </section>
+  <div id="fixture" class="notice fixture" hidden>SCRIPTED FIXTURE — illustrates the viewer; these are not real robot results.</div>
+  <div id="connection-error" class="notice warning" role="status" hidden></div>
+  <nav class="stages" aria-label="Learning loop">
+    <div data-stage="0"><span>01</span> Run <i>→</i></div>
+    <div data-stage="1"><span>02</span> Diagnose <i>→</i></div>
+    <div data-stage="2"><span>03</span> Revise <i>→</i></div>
+    <div data-stage="3"><span>04</span> Test <i>→</i></div>
+    <div data-stage="4"><span>05</span> Keep / Reject</div>
+  </nav>
+  <section class="task-line"><div><span class="eyebrow">CURRENT TASK</span><h2 id="task">Waiting for task evidence</h2></div><div class="task-meta"><span id="run-status">Waiting for artifacts</span><span>Development 0–2 · held-out 3–7 reserved</span></div></section>
+  <section class="runs" aria-label="Run comparison"><article id="baseline" class="run-card"></article><article id="candidate" class="run-card"></article></section>
+  <p class="timing-note">Videos play independently. Playback time is simulated time, not model latency; actions are not synchronized.</p>
+  <section class="learning">
+    <article class="panel skill-panel"><div class="panel-head"><div><p class="eyebrow">EXTERNAL MEMORY</p><h2>What changed in the skill?</h2></div><button id="expand-skill">Read skills ↗</button></div><p id="skill-context" class="muted"></p><div id="diff" class="diff"></div></article>
+    <article class="panel diagnosis-panel"><div class="panel-head"><div><p class="eyebrow">EVIDENCE → HYPOTHESIS</p><h2>Why this revision?</h2></div><button id="expand-diagnosis">Evidence ↗</button></div><p id="diagnosis" class="diagnosis-copy"></p><div class="prediction"><span>PREDICTED BEHAVIOR</span><p id="prediction"></p></div><p id="uncertainty" class="muted"></p></article>
+  </section>
+  <section class="selection" id="selection"><div><span class="eyebrow">EVALUATOR DECISION</span><h2 id="decision-title">No comparison recorded</h2><p id="decision-detail">Waiting for a complete comparison artifact.</p></div><div class="selection-end"><span id="decision-badge" class="badge">NOT MEASURED</span><button id="expand-comparison">Selection details ↗</button></div></section>
+  <details id="warnings-box" class="warnings" hidden><summary id="warnings-title">Artifact notices</summary><ul id="warnings"></ul></details>
+  <footer><span>Success comes only from LIBERO’s recorded predicate. Reaching a waypoint does not establish task success.</span><span id="updated">Read-only viewer</span></footer>
+</main>
+<dialog id="details"><div class="dialog-head"><h2 id="dialog-title">Evidence</h2><button id="close-dialog" aria-label="Close details">✕ Close</button></div><div id="dialog-body"></div></dialog>
+</body></html>

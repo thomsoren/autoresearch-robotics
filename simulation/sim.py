@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 from simulation.prepare import LIBERO_REV, configure
 
@@ -57,6 +58,7 @@ class Robot:
         output="runs/smoke",
         privileged=False,
         video=True,
+        calibrated_depth=False,
     ):
         positive_int(max_steps, "max_steps")
         task_suite = load_suite(suite)
@@ -70,6 +72,7 @@ class Robot:
         self.output.mkdir(parents=True, exist_ok=False)
         self.max_steps, self.steps = max_steps, 0
         self.privileged = privileged
+        self.calibrated_depth = calibrated_depth
         self.success = False
         self.gripper_command = -1.0
         self._writer = None
@@ -84,7 +87,9 @@ class Robot:
             seed=seed,
             max_steps=max_steps,
             settle_steps=10,
-            observation_mode="privileged" if privileged else "rgb_proprio",
+            observation_mode="privileged" if privileged else (
+                "calibrated_rgbd" if calibrated_depth else "rgb_proprio"
+            ),
             libero_revision=LIBERO_REV,
             platform=platform.platform(),
         )
@@ -96,6 +101,7 @@ class Robot:
                 bddl_file_name=task_suite.get_task_bddl_file_path(task_id),
                 camera_heights=256,
                 camera_widths=256,
+                camera_depths=calibrated_depth,
                 control_freq=20,
                 horizon=max_steps + 10,
                 ignore_done=True,
@@ -135,6 +141,14 @@ class Robot:
         if self._writer is not None:
             self._writer.append_data(self._image("agentview"))
 
+    def pose(self):
+        """Measured world pose at the grip site used by OSC, with no physics advance."""
+        arm = self._env.env.robots[0]
+        return (
+            arm.sim.data.site_xpos[arm.eef_site_id].copy(),
+            arm.sim.data.site_xmat[arm.eef_site_id].reshape(3, 3).copy(),
+        )
+
     def observe(self):
         import imageio.v2 as imageio
 
@@ -146,14 +160,43 @@ class Robot:
         result = dict(
             instruction=self.metadata["instruction"],
             images=images,
-            eef_pos=self._obs["robot0_eef_pos"].tolist(),
-            eef_quat_xyzw=self._obs["robot0_eef_quat"].tolist(),
+            eef_pos=self.pose()[0].tolist(),
+            eef_quat_xyzw=Rotation.from_matrix(self.pose()[1]).as_quat().tolist(),
             gripper_qpos=self._obs["robot0_gripper_qpos"].tolist(),
             steps=self.steps,
             remaining_steps=self.max_steps - self.steps,
             success=self.success,
             done=self.done,
         )
+        if self.calibrated_depth:
+            sim = self._env.env.sim
+            geometry = {}
+            for camera in images:
+                normalized = np.ascontiguousarray(self._obs[f"{camera}_depth"][::-1]).squeeze(-1)
+                near = sim.model.vis.map.znear * sim.model.stat.extent
+                far = sim.model.vis.map.zfar * sim.model.stat.extent
+                depth = (near / (1 - normalized * (1 - near / far))).astype(np.float32)
+                depth[normalized >= 1 - 1e-6] = np.nan
+                height, width = depth.shape
+                camera_id = sim.model.camera_name2id(camera)
+                focal = height / (2 * np.tan(np.deg2rad(sim.model.cam_fovy[camera_id]) / 2))
+                intrinsic = np.array([[focal, 0, width / 2], [0, focal, height / 2], [0, 0, 1]])
+                camera_to_world = np.eye(4)
+                # OpenGL camera axes -> displayed top-left, positive optical depth.
+                camera_to_world[:3, :3] = sim.data.cam_xmat[camera_id].reshape(3, 3) @ np.diag([1, -1, -1])
+                camera_to_world[:3, 3] = sim.data.cam_xpos[camera_id]
+                path = self.output / f"{self.steps:04d}-{camera}-depth.npz"
+                np.savez_compressed(path, depth=depth)
+                geometry[camera] = {
+                    "depth_path": str(path),
+                    "intrinsics": intrinsic.tolist(),
+                    "camera_to_world": camera_to_world.tolist(),
+                    "step": self.steps,
+                }
+            result["camera_geometry"] = geometry
+            (self.output / f"{self.steps:04d}-camera-geometry.json").write_text(
+                json.dumps(geometry, indent=2) + "\n"
+            )
         if self.privileged:
             result["object_state"] = {
                 key: np.asarray(value).tolist()
@@ -172,6 +215,9 @@ class Robot:
                     dict(
                         step=self.steps,
                         action=list(map(float, action)),
+                        eef_pos=self.pose()[0].tolist(),
+                        eef_quat_xyzw=Rotation.from_matrix(self.pose()[1]).as_quat().tolist(),
+                        gripper_qpos=self._obs["robot0_gripper_qpos"].tolist(),
                         reward=float(reward),
                         success=self.success,
                     )
