@@ -1,0 +1,93 @@
+{
+  "benchmark": "Robosuite Panda Lift in MuJoCo (not LIBERO)",
+  "model": "claude-fable-5-1",
+  "memory_sha256": "aae043174840b5318ab6abff6c72c6f0f35098dd8eda966a3b324177a4f69742",
+  "development": {
+    "seeds": [
+      0,
+      1,
+      2
+    ],
+    "baseline_successes": 2,
+    "memory_successes": 3,
+    "baseline_steps": [
+      259,
+      500,
+      249
+    ],
+    "memory_steps": [
+      99,
+      96,
+      246
+    ]
+  },
+  "held_out": {
+    "seeds": [
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "matched_protocol": true,
+    "baseline_successes": 3,
+    "memory_successes": 4,
+    "baseline_mean_steps": 408.4,
+    "memory_mean_steps": 239.0
+  },
+  "held_out_pairs": [
+    {
+      "seed": 3,
+      "baseline_success": true,
+      "baseline_steps": 390,
+      "memory_success": true,
+      "memory_steps": 399
+    },
+    {
+      "seed": 4,
+      "baseline_success": false,
+      "baseline_steps": 500,
+      "memory_success": true,
+      "memory_steps": 98
+    },
+    {
+      "seed": 5,
+      "baseline_success": true,
+      "baseline_steps": 405,
+      "memory_success": false,
+      "memory_steps": 500
+    },
+    {
+      "seed": 6,
+      "baseline_success": false,
+      "baseline_steps": 500,
+      "memory_success": true,
+      "memory_steps": 99
+    },
+    {
+      "seed": 7,
+      "baseline_success": true,
+      "baseline_steps": 247,
+      "memory_success": true,
+      "memory_steps": 99
+    }
+  ],
+  "limits": [
+    "Five seeds, one sampled rollout per condition/seed.",
+    "Conditions were not interleaved; baseline held-out run occurred later.",
+    "Memory was frozen before held-out runs; no learning from held-out outcomes.",
+    "Source teammate files were read only; no automatic promotion into active skills."
+  ],
+  "video_sha256": {
+    "lift-baseline.mp4": "311129cd632d8ef937a853c5ce8196031947a9158d92c19487d121a697157479",
+    "lift-before-after.mp4": "a24a4a73b31f66d038af6fd25db1cf2e39050ce13f54bed3db2ef100723ce5f3",
+    "lift-heldout-memory.mp4": "7227b10a145589462bce2d5ee4896bb58601bb8172caead017cbc413cc62ab05",
+    "stack-baseline.mp4": "a6eaaa2a73a637fa64ac4d0c7ab1fd6e168009d6ea7392e2babff9889827198a"
+  },
+  "video_notes": {
+    "lift-before-after.mp4": "Development seed 1: baseline fails at 500 steps; memory succeeds at 96. Right freezes after success.",
+    "lift-baseline.mp4": "Development seed 0: baseline succeeds in 259 steps.",
+    "lift-heldout-memory.mp4": "Held-out seed 4: frozen memory succeeds in 98 steps.",
+    "stack-baseline.mp4": "Separate Panda Stack baseline, seed 1: succeeds in 178 steps. Not a memory-improvement comparison."
+  }
+}

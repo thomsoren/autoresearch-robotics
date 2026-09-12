@@ -1,6 +1,25 @@
 # Autoresearch for robotics
 
-Agent skill improvement on LIBERO in MuJoCo. Python 3.11, managed with `uv`.
+Robot agents learn reusable Markdown skills from simulation feedback. **Run → inspect failures → write a skill → replay → keep measured gains.** Built with MuJoCo, Inspect Robots, Python 3.11 and `uv`.
+
+## Watch the robot
+
+In our small **Panda Lift** study, the same Fable 5.1 policy improved with memory from **2/3 → 3/3 development successes** and **3/5 → 4/5 on unseen seeds**. Mean held-out controller steps fell **408.4 → 239 (41% fewer)**, including failures.
+
+| Lift · before and after, same starting state | Lift · unseen starting state, with memory |
+| --- | --- |
+| [![Side-by-side: baseline failure and memory-assisted success](docs/demos/lift-before-after.gif)](docs/demos/lift-before-after.mp4) | [![Robot lifts the cube on held-out seed 4 with frozen memory](docs/demos/lift-heldout-memory.gif)](docs/demos/lift-heldout-memory.mp4) |
+| Seed 1: **baseline fails at 500 steps; memory succeeds at 96**. | Seed 4: **success in 98 steps** with the frozen memory. |
+| **Lift · successful baseline, no memory** | **Stack · successful baseline** |
+| [![Baseline robot successfully lifts a cube](docs/demos/lift-baseline.gif)](docs/demos/lift-baseline.mp4) | [![Robot stacks the red cube on the green cube and releases it](docs/demos/stack-baseline.gif)](docs/demos/stack-baseline.mp4) |
+| Seed 0: **success in 259 steps**. | Separate stacking task, seed 1: **success in 178 steps**. |
+
+**Click any animation for the full MP4.** Videos show simulation time with model waiting omitted; the successful side of the comparison freezes at completion.
+
+[Read the actual learned memory](docs/demos/lift-memory.md) · [Per-seed results and video provenance](docs/demos/results.json)
+
+These are **Robosuite tasks in MuJoCo**, separate from our LIBERO experiments. The Lift comparison uses the same model, controller, budgets and matched starts; only the memory changes. This is a small study with one rollout per condition/seed, non-interleaved runs, and one held-out regression. Stack is a baseline demonstration. Our LIBERO stove experiment remained at 0/3 across three skill revisions.
+
 
 ## Ownership and layout
 
