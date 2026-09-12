@@ -59,8 +59,11 @@ def _selected_development(loop_dir, state):
     elif selected_skill is not None:
         raise ValueError("Loop names a selected skill that is absent from its batch")
     baseline_skill = baseline / "skills/task/SKILL.md"
-    return baseline, selected, baseline_skill if baseline_skill.is_file() else None, (
-        skill if skill.is_file() else None
+    return (
+        baseline,
+        selected,
+        baseline_skill if baseline_skill.is_file() else None,
+        (skill if skill.is_file() else None),
     )
 
 
@@ -82,9 +85,7 @@ def _validate_stored_profile(stored):
     loop.validate_protocol(protocol)
     if _json_hash(config) != protocol["executor_config_sha256"]:
         raise ValueError("Stored executor configuration hash does not match its contents")
-    if hashlib.sha256(stored["base_prompt"].encode()).hexdigest() != protocol[
-        "base_prompt_sha256"
-    ]:
+    if hashlib.sha256(stored["base_prompt"].encode()).hexdigest() != protocol["base_prompt_sha256"]:
         raise ValueError("Stored base prompt hash does not match its contents")
     if _json_hash(stored["identity"]) != protocol["executor_revision"]:
         raise ValueError("Stored executor revision does not match its identity")
@@ -119,6 +120,42 @@ def _condition(batch_path, source_batch):
     }
 
 
+def _validate_held_out_pair(baseline, selected, states):
+    """Validate paired evidence without selecting a skill from held-out outcomes."""
+    left, _, left_rows = loop.load_batch(baseline)
+    right, _, right_rows = loop.load_batch(selected)
+    for manifest in (left, right):
+        if (
+            manifest.get("state_ids") != list(states)
+            or manifest.get("evaluation_split") != "held_out"
+        ):
+            raise ValueError("Held-out batch disagrees with the requested cases")
+        for key in ("episode_seeds", "initial_frame_sha256"):
+            if not isinstance(manifest.get(key), dict) or not manifest[key]:
+                raise ValueError(f"Held-out batch is missing {key}")
+    for key in (
+        "policy",
+        "suite",
+        "task_id",
+        "seed",
+        "max_steps",
+        "observation_mode",
+        "control",
+        "episode_seeds",
+        "initial_frame_sha256",
+        "executor_protocol",
+        "simulator_sha256",
+        "evaluator_sha256",
+        "dependency_lock_sha256",
+    ):
+        if left.get(key) is None or left.get(key) != right.get(key):
+            raise ValueError(f"Held-out conditions disagree: {key}")
+    for manifest, rows in ((left, left_rows), (right, right_rows)):
+        for row in rows:
+            if row.get("seed") != manifest["episode_seeds"][str(row["init_state_id"])]:
+                raise ValueError("Held-out episode disagrees with its recorded seed")
+
+
 def _snapshot_skill(source, destination, expected_hash):
     if source is None:
         if loop.skill_hash(None) != expected_hash:
@@ -147,10 +184,9 @@ def run(args):
     config = _validate_stored_profile(stored)
     baseline_manifest, _, _ = loop.load_batch(baseline)
     selected_manifest, _, _ = loop.load_batch(selected)
-    if (
-        baseline_manifest.get("executor_protocol") != stored.get("protocol")
-        or selected_manifest.get("executor_protocol") != stored.get("protocol")
-    ):
+    if baseline_manifest.get("executor_protocol") != stored.get(
+        "protocol"
+    ) or selected_manifest.get("executor_protocol") != stored.get("protocol"):
         raise ValueError("Development batches disagree with the frozen protocol")
     executor_args = _executor_args(config, args)
     for name, expected in (
@@ -161,9 +197,7 @@ def run(args):
         ("control", config["control"]),
     ):
         if baseline_manifest.get(name) != expected or selected_manifest.get(name) != expected:
-            raise ValueError(
-                f"Development {name} disagrees with the frozen executor configuration"
-            )
+            raise ValueError(f"Development {name} disagrees with the frozen executor configuration")
     for name in (
         "policy",
         "observation_mode",
@@ -241,6 +275,7 @@ def run(args):
             states=args.states,
             split="held_out",
         )
+        _validate_held_out_pair(baseline_run, selected_run, args.states)
         baseline_result = _condition(baseline_run, baseline)
         selected_result = _condition(selected_run, selected)
         report["conditions"] = {

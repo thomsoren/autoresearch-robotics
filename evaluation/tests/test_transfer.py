@@ -41,6 +41,8 @@ def write_batch(
         "simulator_sha256": "sim",
         "evaluator_sha256": "eval",
         "dependency_lock_sha256": "lock",
+        "episode_seeds": {},
+        "initial_frame_sha256": {},
     }
     if evaluation_split is not None:
         manifest["evaluation_split"] = evaluation_split
@@ -64,6 +66,15 @@ def write_batch(
             row["evaluation_split"] = evaluation_split
         episode = path / f"state-{state:03d}"
         episode.mkdir()
+        manifest["episode_seeds"][str(state)] = row["seed"]
+        manifest["initial_frame_sha256"][str(state)] = {}
+        for camera in ("agentview", "robot0_eye_in_hand"):
+            # Synthetic bytes: these tests validate evidence hashes, not image decoding.
+            frame = episode / f"0000-{camera}.png"
+            frame.write_bytes(f"fixture-{state}-{camera}".encode())
+            manifest["initial_frame_sha256"][str(state)][camera] = hashlib.sha256(
+                frame.read_bytes()
+            ).hexdigest()
         loop.save(episode / "result.json", row)
         rows.append(row)
     (path / "results.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
@@ -201,6 +212,65 @@ def test_frozen_evaluation_runs_original_baseline_and_selected_snapshot(
     assert report["active_skills_updated"] is False
     assert report["conditions"]["selected"]["outcomes"][0]["evaluation_split"] == "held_out"
     assert json.loads((tmp_path / "held-out/frozen-evaluation.json").read_text()) == report
+
+
+@pytest.mark.parametrize("mismatch", ["episode_seeds", "initial_frame_sha256", "missing_frames"])
+def test_frozen_evaluation_rejects_unmatched_initial_conditions(
+    frozen_loop, tmp_path, monkeypatch, mismatch
+):
+    development, _, _ = frozen_loop
+
+    def fake_batch(args, output, skill, current, deadline, states, split):
+        batch = write_batch(
+            output,
+            states=states,
+            protocol=current["protocol"],
+            successes=[] if skill is None else states,
+            skill_text=None if skill is None else Path(skill).read_text(),
+            evaluation_split=split,
+        )
+        if output.name == "selected":
+            manifest = loop.read(batch / "manifest.json")
+            if mismatch == "episode_seeds":
+                manifest["episode_seeds"][str(states[0])] += 1
+            elif mismatch == "missing_frames":
+                del manifest["initial_frame_sha256"]
+            else:
+                frame = batch / f"state-{states[0]:03d}/0000-agentview.png"
+                frame.write_bytes(b"different valid initial observation")
+                manifest["initial_frame_sha256"][str(states[0])]["agentview"] = hashlib.sha256(
+                    frame.read_bytes()
+                ).hexdigest()
+            loop.save(batch / "manifest.json", manifest)
+            summary = loop.read(batch / "summary.json")
+            if mismatch == "missing_frames":
+                del summary["initial_frame_sha256"]
+            loop.save(batch / "summary.json", {**summary, **manifest})
+        loop.load_batch(batch)  # Each condition is independently valid.
+        return batch
+
+    monkeypatch.setattr(loop, "batch", fake_batch)
+    output = tmp_path / "held-out"
+    args = transfer.arguments(
+        [
+            "--loop",
+            str(development),
+            "--output",
+            str(output),
+            "--suite",
+            "libero_goal",
+            "--task-id",
+            "0",
+            "--states",
+            "3",
+            "4",
+        ]
+    )
+    with pytest.raises(ValueError, match="Held-out"):
+        transfer.run(args)
+    report = loop.read(output / "frozen-evaluation.json")
+    assert report["status"] == "error"
+    assert "comparison" not in report
 
 
 def test_same_task_development_states_cannot_enter_frozen_evaluation(

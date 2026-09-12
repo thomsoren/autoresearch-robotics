@@ -41,7 +41,7 @@ No agent has solved a task yet; these are infrastructure checks.
 ```bash
 # Repeated fixed-state infrastructure evaluation (not an agent baseline)
 uv run -m evaluation.evaluate --states 0 1 --max-steps 20 --output runs/noop
-uv run --group evaluation pytest -q
+uv run --locked --group evaluation --group execute pytest -q
 uv run ruff check .
 ```
 

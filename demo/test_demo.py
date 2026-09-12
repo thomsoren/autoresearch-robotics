@@ -1,10 +1,10 @@
 """Synthetic fixtures used only for viewer tests, never benchmark results."""
 import http.client
 import json
-from pathlib import Path
 import tempfile
 import threading
 import unittest
+from pathlib import Path
 
 from demo.artifacts import snapshot
 from demo.serve import make_server

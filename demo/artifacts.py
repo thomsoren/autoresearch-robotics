@@ -3,8 +3,8 @@ import difflib
 import hashlib
 import json
 import os
-from pathlib import Path, PurePosixPath
 import re
+from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
 JSON_NAMES = {

@@ -1,9 +1,9 @@
 """Local artifact viewer: python -m demo.serve --run /absolute/run --port 8765."""
 import argparse
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
-from pathlib import Path
 import re
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .artifacts import open_artifact, snapshot
