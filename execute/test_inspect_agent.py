@@ -230,3 +230,43 @@ def test_fable_preserves_image_history_and_thinking_prefixes(tmp_path):
             )
         )
     assert len(requests) == 4
+
+
+def test_transport_failure_is_counted_and_logged_without_exception_secrets(tmp_path):
+    budget = RequestBudget(tmp_path, 1, time.monotonic() + 120)
+    budget.inner.close()
+
+    def respond(request):
+        assert request.extensions["timeout"]["read"] > 90
+        raise httpx.ReadTimeout("sensitive-request-data", request=request)
+
+    budget.inner = httpx.MockTransport(respond)
+    with httpx.Client(transport=budget) as client:
+        with pytest.raises(httpx.ReadTimeout):
+            client.post("https://api.anthropic.com/v1/messages", json={"model": "claude-fable-5-1"})
+    record = json.loads((tmp_path / "requests.jsonl").read_text())
+    assert record["request"] == budget.count == 1
+    assert record["error_type"] == "ReadTimeout"
+    assert record["http_status"] is None
+    assert "sensitive-request-data" not in str(record)
+
+
+def test_refusal_records_only_public_text_and_preserves_response(tmp_path):
+    budget = RequestBudget(tmp_path, 1, time.monotonic() + 120)
+    budget.inner.close()
+    payload = {
+        "model": "claude-fable-5-1",
+        "stop_reason": "refusal",
+        "content": [
+            {"type": "thinking", "thinking": "private internal text", "signature": "private-signature"},
+            {"type": "text", "text": "Public refusal explanation."},
+        ],
+    }
+    budget.inner = httpx.MockTransport(lambda request: httpx.Response(200, json=payload))
+    with httpx.Client(transport=budget) as client:
+        response = client.post("https://api.anthropic.com/v1/messages", json={"model": "claude-fable-5-1"})
+    assert response.json() == payload
+    record = json.loads((tmp_path / "requests.jsonl").read_text())
+    assert record["stop_reason"] == "refusal"
+    assert record["public_text"] == ["Public refusal explanation."]
+    assert "private" not in str(record)

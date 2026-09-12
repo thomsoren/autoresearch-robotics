@@ -45,6 +45,9 @@ def identity():
         for name in (
             "execute/inspect_agent.py",
             "execute/control.py",
+            "execute/operational_policy.py",
+            "execute/perception.py",
+            "execute/reactive_controller.py",
             "simulation/sim.py",
             "evaluation/evaluate.py",
             "evaluation/loop.py",
@@ -63,12 +66,12 @@ def profile(args):
     # Public policy lifecycle constructs the actual base prompt without API calls
     # or creating a simulator. The executor itself remains unchanged.
     from inspect_robots import Scene
-    from inspect_robots_agent import LLMAgentPolicy
 
     from execute.control import pose_precheck
     from execute.inspect_agent import LiberoEmbodiment, image_horizon, output_token_limit
+    from execute.operational_policy import OperationalPolicy
 
-    policy = LLMAgentPolicy(
+    policy = OperationalPolicy(
         model=args.model,
         wire="messages",
         speed=None,
@@ -186,7 +189,7 @@ def batch(args, output, skill, frozen, deadline, states=STATES, split="developme
         "initial_frame_sha256": {},
         "max_steps": args.max_steps,
         "skill_hash": fingerprint,
-        "observation_mode": "rgb_proprio",
+        "observation_mode": "calibrated_rgbd",
         "control": args.control,
         "evaluation_split": split,
         "executor_protocol": frozen["protocol"],

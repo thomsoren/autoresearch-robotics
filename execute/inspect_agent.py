@@ -33,11 +33,12 @@ from inspect_robots import (
     eval,
     success_at_end,
 )
-from inspect_robots_agent import LLMAgentPolicy
 from scipy.spatial.transform import Rotation
 
 from evaluation.evaluate import skill_hash
 from execute.control import pose_precheck, rotation_from_6d, servo_pose
+from execute.operational_policy import OperationalPolicy
+from execute.reactive_controller import ReactiveController
 from simulation.sim import SUITES, Robot, positive_int, vector
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,6 +57,10 @@ def output_token_limit(model):
 
 
 DOCS = """LIBERO Panda robot. Images are upright external and wrist RGB views.
+Each displayed image is 256 by 256 pixels. locate_pixels queries calibrated
+depth for chosen visible pixels without moving the robot. It reports WORLD
+surface positions in meters, not object centers or verified grasp targets.
+The queried camera geometry belongs to the current observation, including wrist motion.
 For note and hindsight, provide only a brief operational summary: visible scene
 evidence, the intended action, or the observed outcome and practical lesson.
 Position and orientation are measured at the same grip site in WORLD coordinates.
@@ -64,6 +69,9 @@ not plan around obstacles or guarantee arrival. Each Inspect waypoint can consum
 up to 30 PHYSICS steps. Native Inspect step counts are waypoints, not physics time.
 Read physics_steps, remaining_steps, motion_position_error, motion_rotation_error
 and motion_reached after a call. Re-observe and adapt when movement falls short.
+If a waypoint stalls or reaches its motion limit, its remaining queued waypoints
+are discarded and you receive a fresh observation. Choose the next action from
+the measured pose and visible scene; the previous destination was not reached.
 Finger qpos is measured in meters. Closed fingers do not establish a grasp.
 Only LIBERO decides success; done cannot declare it. Reward is sparse success.
 """
@@ -157,6 +165,7 @@ class LiberoEmbodiment:
             seed=0 if seed is None else seed,
             max_steps=self.max_steps,
             output=self.output / f"state-{self.state_id:03d}",
+            calibrated_depth=True,
         )
         return self.observation(self.robot.observe())
 
@@ -182,6 +191,10 @@ class LiberoEmbodiment:
                 "motion_reached": np.array([float(motion.get("reached", True))]),
             },
             instruction=raw["instruction"],
+            extra={
+                "discard_action_chunk": motion.get("stop_reason") in {"stalled", "motion_limit"},
+                "camera_geometry": raw.get("camera_geometry", {}),
+            },
         )
 
     def step(self, action):
@@ -249,26 +262,41 @@ class RequestBudget(httpx.BaseTransport):
         request.extensions["timeout"] = {
             name: min(30.0, remaining) for name in ("connect", "read", "write", "pool")
         }
+        request.extensions["timeout"]["read"] = min(120.0, remaining)
         started = time.monotonic()
-        response = self.inner.handle_request(request)
-        response.read()
-        try:
-            body = response.json()
-        except ValueError:
-            body = {}
         sent = json.loads(request.content)
         record = {
             "request": self.count,
             "requested_model": sent.get("model"),
             "requested_speed": sent.get("speed"),
-            "http_status": response.status_code,
-            "response_model": body.get("model"),
-            "usage": body.get("usage"),
-            "wall_seconds": time.monotonic() - started,
+            "http_status": None,
         }
-        with (self.output / "requests.jsonl").open("a") as stream:
-            stream.write(json.dumps(record) + "\n")
-        return response
+        try:
+            response = self.inner.handle_request(request)
+            record["http_status"] = response.status_code
+            response.read()
+            try:
+                body = response.json()
+            except ValueError:
+                body = {}
+            record.update(
+                response_model=body.get("model"),
+                usage=body.get("usage"),
+                stop_reason=body.get("stop_reason"),
+            )
+            if body.get("stop_reason") == "refusal":
+                record["public_text"] = [
+                    block["text"] for block in body.get("content", [])
+                    if block.get("type") == "text" and isinstance(block.get("text"), str)
+                ]
+            return response
+        except BaseException as exc:
+            record["error_type"] = type(exc).__name__
+            raise
+        finally:
+            record["wall_seconds"] = time.monotonic() - started
+            with (self.output / "requests.jsonl").open("a") as stream:
+                stream.write(json.dumps(record) + "\n")
 
     def close(self):
         self.inner.close()
@@ -354,7 +382,7 @@ def run(args):
 
             instruction = load_suite(args.suite).get_task(args.task_id).language
             scene = Scene(id=scene.id, instruction=instruction, init_seed=args.seed)
-            policy = LLMAgentPolicy(
+            policy = OperationalPolicy(
                 model=args.model,
                 wire="messages",
                 speed="fast" if args.speed == "fast" else None,
@@ -382,6 +410,7 @@ def run(args):
                 task,
                 policy,
                 embodiment,
+                controller=ReactiveController(),
                 log_dir=str(output / "inspect"),
                 seed=args.seed,
                 store_frames=True,

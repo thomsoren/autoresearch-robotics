@@ -93,7 +93,7 @@ def rig(tmp_path, monkeypatch):
                 "init_state_id": index,
                 "seed": 100 + index + (batch_number if state.get("seed_mismatch") else 0),
                 "max_steps": 300,
-                "observation_mode": "rgb_proprio",
+                "observation_mode": "calibrated_rgbd",
                 "control": "pose",
                 "policy": "inspect-robots-agent",
                 "skill_hash": fingerprint,
