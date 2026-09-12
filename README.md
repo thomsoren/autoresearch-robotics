@@ -7,7 +7,7 @@ Agent skill improvement on LIBERO in MuJoCo. Python 3.11, managed with `uv`.
 ```text
 simulation/     Thomas: MuJoCo/LIBERO setup, robot tools, existing evaluation utility and tests
 docs/           setup guide, project plan and earlier skill-loop notes
-harness/        reserved for Laksiya; she creates and owns this folder
+harness/        Laksiya: Claude Agent SDK robot console and skill-improvement loop
 pyproject.toml  shared uv environment
 uv.lock         pinned dependencies
 ```
@@ -42,8 +42,29 @@ See [setup and robot API](docs/SETUP.md), [10-hour plan](docs/PLAN.md), and the
 [earlier loop proposal](docs/program.md). These notes are a handoff for Laksiya,
 not an implemented agent harness.
 
+## Robot console
+
+A Claude Agent SDK session that translates terminal instructions into robot tool calls
+against one live episode:
+
 ```bash
-uv run pytest simulation/tests -q
+uv run -m harness.repl --task 0 --state 0
+```
+
+Type an instruction (`open the middle drawer of the cabinet`); the agent calls
+`observe` / `move_to` / `gripper` / `step` and gets both camera images back each turn.
+`/status`, `/budget` and `/quit` are handled locally. Every run writes `episode.mp4`,
+`actions.jsonl`, `harness_log.jsonl` and `session.json` into its `runs/` directory.
+The session loads no project settings and no skills, so it is a clean no-skills
+condition. Requires the Claude Code CLI on PATH.
+
+Credentials come from a gitignored `.env` in the repository root, loaded at startup
+(`cp .env.example .env`, then fill in `ANTHROPIC_API_KEY`). It is picked up automatically
+when present and skipped when absent; variables already exported in your shell win over
+the file. If `claude` is already logged in, no key is needed.
+
+```bash
+uv run pytest harness/tests simulation/tests -q
 docker build -f simulation/Dockerfile -t autoresearch-robotics:local .
 mkdir -p runs
 docker run --rm -v "$PWD/runs:/app/runs" autoresearch-robotics:local
