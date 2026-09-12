@@ -4,7 +4,9 @@
 !simulation/__init__.py
 !simulation/prepare.py
 !simulation/sim.py
-!simulation/evaluate.py
+!evaluation/
+!evaluation/__init__.py
+!evaluation/evaluate.py
 !pyproject.toml
 !uv.lock
 !.python-version

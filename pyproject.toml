@@ -23,6 +23,16 @@ dependencies = [
 
 [dependency-groups]
 dev = ["pytest>=8,<9", "ruff>=0.9,<1"]
+evaluation = [
+    "claude-agent-sdk>=0.2.152",
+    "inspect-robots>=0.58.0",
+    "jsonschema>=4.26.0",
+    "python-dotenv>=1.2.3",
+]
+execute = [
+    "inspect-robots-agent>=0.26.0",
+    "python-dotenv>=1.2.3",
+]
 
 [tool.uv]
 package = false

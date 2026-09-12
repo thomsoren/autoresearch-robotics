@@ -10,5 +10,6 @@ COPY simulation/prepare.py simulation/prepare.py
 RUN uv run --no-project simulation/prepare.py
 COPY pyproject.toml uv.lock .python-version ./
 RUN uv sync --locked --no-dev
-COPY simulation/__init__.py simulation/sim.py simulation/evaluate.py simulation/
+COPY simulation/__init__.py simulation/sim.py simulation/
+COPY evaluation/__init__.py evaluation/evaluate.py evaluation/
 CMD ["uv", "run", "--no-sync", "-m", "simulation.sim", "smoke"]
