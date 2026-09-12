@@ -18,13 +18,21 @@ Markdown, holding execution fixed.
 
 The acting model is Fable 5.1 (`claude-fable-5-1`) using the existing .env token.
 The skill-author model is configured separately. Do not conflate older Opus runs
-with Fable results. The completed Fable loop is `runs/architecture-fable-learning-2`.
-It ran baseline, author, candidate tests and rejection: 0/3 successes in both
-conditions, two policy errors in each, no selected guide. Baseline/candidate
-physics steps total 919/1140; API attempts total 5/11. Sonnet author cost $0.13599505.
-Use this as the primary saved replay. It proves the workflow, not a learning gain.
-The preceding `architecture-fable-learning` run ended on an author timeout;
-it is preserved as failed-run evidence and has no tested candidate.
+with Fable results. Use `runs/cheese-learning-demo` as the primary saved replay.
+It contains a matched baseline and two complete guide revisions:
+
+| Development condition | LIBERO successes | Policy errors | Physics steps | API attempts | Decision |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Empty baseline | 1/3 | 0 | 3366 | 61 | Incumbent |
+| Guide revision 1 | 1/3 | 0 | 2624 | 49 | Reject: tie |
+| Guide revision 2 | 2/3 | 0 | 2094 | 47 | Keep: strict increase |
+
+All three conditions used the same Fable actor, calibrated RGB-D observations,
+reactive controller and execution budgets; only the frozen guide changed. The 1/3
+to 2/3 result satisfies the development selection rule on three states. It is a small
+development result with no held-out or cross-task evaluation, so it does not establish
+generalization. The author can overstate causal explanations; treat its diagnosis as a
+hypothesis and present only the recorded behavior and outcomes as validated evidence.
 
 The implementation includes measured translation/orientation control, per-waypoint
 evidence, operational schema wording, bounded `locate_pixels` queries, an evidence-only
@@ -33,18 +41,25 @@ evaluation path. A public Inspect controller discards the remainder of a motion 
 after measured `stalled` or `motion_limit` feedback, then requests a fresh action from
 the new observation; successful chunks continue normally.
 
-Current task: LIBERO Goal task 0, open the middle drawer. Development states
-0,1,2 only. DO NOT run states 3-7 or any model/API call. Gripper-tip work is excluded.
+Current replay task: LIBERO Goal task 6, put the cream cheese in the bowl.
+It uses development states 0,1,2 only. DO NOT run states 3-7 or any model/API call.
+Gripper-tip work is excluded.
 
-Verified: 151 tests pass, including real physics control and camera-geometry checks. The complete
-Fable cycle generated a general guide and rejected it after fresh tests. Older
-Opus/Sonnet experiments remain available but are not part of that comparison.
-No successful learned improvement is established.
+Verified: 151 core tests pass, including real physics control and camera-geometry
+checks; 14 separate viewer tests pass. Revision 2 was retained after fresh development
+episodes. Calibrated depth or visible surface localization alone is not a learning
+result, and the retained guide has not been tested on held-out states.
 
-A fresh matched three-state cream-cheese baseline/candidate confirmation is running
-under `runs/cheese-confirmation`. Do not present it as a completed comparison until all
-six episodes finish, the parts are assembled, and frozen provenance validation passes.
-Calibrated depth or visible surface localization alone is not a learned-success result.
+Launch the canonical replay from the integration worktree:
+
+```bash
+python3 -m demo.serve \
+  --run /home/ludvig/autoresearch-architecture/runs/cheese-learning-demo \
+  --port 8767 --replay
+```
+
+Open `http://127.0.0.1:8767`. The selected immutable guide is
+`runs/cheese-learning-demo/iteration-002/candidate/skills/task/SKILL.md`.
 
 ## Workspace and ownership
 
@@ -134,8 +149,10 @@ or goals; do not visualize its output as any of those claims.
 Only `result.json.success` establishes benchmark outcome. Display missing metrics
 as not measured. Label any synthetic fixture visibly; never mix it with genuine
 results. A rejected candidate still demonstrates the actual loop, not improvement.
-Use `result.json.api_requests_attempted` for request counts, including retries;
-`requests.jsonl` can omit transport exceptions and therefore undercount attempts.
+Use `result.json.api_requests_attempted` for authoritative request counts, including
+retries. The current logger records every attempt in `requests.jsonl`, including
+transport exceptions; older historical runs can have gaps because they predate this
+guarantee.
 Infer tested/rejected status from comparison.json, while preserving the original
 proposal's immutable `validation_status: unvalidated` field.
 

@@ -122,8 +122,9 @@ PYTHONPATH=. .venv/bin/python -m pytest -q
 .venv/bin/ruff check .
 ```
 
-Latest full verification: **151 tests passed**, Ruff clean. The stock pose/gripper
-integration test uses mocked HTTP responses with real LIBERO physics.
+Latest verification: **151 core tests passed**, Ruff clean. The integrated read-only
+viewer has a separate **14 passing tests**. The stock pose/gripper integration test
+uses mocked HTTP responses with real LIBERO physics.
 
 Upstream torch/robosuite deprecation warnings remain. The existing diagnosis scripts
 are historical scientific evidence, distinct from evaluated robot-agent episodes.
@@ -156,11 +157,34 @@ It does not establish a performance gain. Each condition had only one episode
 without a policy error; refusal episodes are not ordinary behavioral failures.
 No held-out state was used.
 
-A fresh matched three-state confirmation for LIBERO Goal task 6 is running under
-`runs/cheese-confirmation`, with independently launched baseline and candidate parts
-for development states 0,1,2. Do not claim task success or a learned gain until all
-six episodes complete, each part passes batch validation, and the assembled conditions
-pass the official comparison with identical frozen provenance.
+Two matched three-state revisions for LIBERO Goal task 6 completed with no policy
+errors. Every condition used the same Fable 5.1 actor, calibrated RGB-D observations,
+reactive controller, pose interface, initial-state evidence and request/physics/time
+budgets. Only the frozen Markdown guide changed:
+
+| Development condition | LIBERO successes | Policy errors | Physics steps | API attempts | Decision |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Empty baseline | 1/3 | 0 | 3366 | 61 | Incumbent |
+| Guide revision 1 | 1/3 | 0 | 2624 | 49 | Reject: tie |
+| Guide revision 2 | 2/3 | 0 | 2094 | 47 | Keep: strict increase |
+
+The official comparison retained revision 2 because its development success count
+increased from 1/3 to 2/3. This is a positive result on a small, fixed development
+sample. No held-out state has run, so it does not establish generalization or transfer.
+The author's causal diagnosis and explanations remain hypotheses and may overstate what
+the evidence supports; only the recorded actions, simulator outcomes and matched counts
+were validated.
+
+The canonical read-only replay is `runs/cheese-learning-demo`. Launch it with:
+
+```bash
+python3 -m demo.serve \
+  --run /home/ludvig/autoresearch-architecture/runs/cheese-learning-demo \
+  --port 8767 --replay
+```
+
+Open `http://127.0.0.1:8767`. The retained snapshot is
+`runs/cheese-learning-demo/iteration-002/candidate/skills/task/SKILL.md`.
 
 The proposed guide contains no stored scene coordinates or fixed trajectory.
 Its budget ratios, direct-approach advice and visual grasp checks remain unproven
@@ -172,6 +196,7 @@ in `runs/architecture-fable-direct-check` established that Fable rejects disable
 thinking with HTTP 400; the supported low-effort adaptive configuration remains.
 
 For API attempt counts, use `result.json.api_requests_attempted`; it includes
-transport retries. `requests.jsonl` contains received responses and usage, but
-transport exceptions can leave gaps in its request numbers. Missing response
-usage must not be presented as zero cost or zero tokens.
+transport retries. The current request logger writes one `requests.jsonl` record in a
+`finally` block for every attempt, including transport exceptions. Older historical
+runs predate that guarantee and can contain gaps, so their result count remains
+authoritative. Missing response usage must not be presented as zero cost or zero tokens.
