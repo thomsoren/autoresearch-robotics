@@ -12,6 +12,10 @@ Start with [current implementation and commands](docs/IMPLEMENTATION.md),
 Gripper-tip testing is paused. Historical handoff sections below describe the
 original team split; they do not restrict work authorized for this branch.
 
+For the hackathon presentation, see the [recorded result and portable demo](examples/cream-cheese/README.md).
+The selected guide and compact measured outcomes are included here; the Lito demo
+branch bundles its videos and runs with `bun run dev:demo` without the robot runtime.
+
 ## Ownership and layout
 
 ```text
