@@ -17,6 +17,18 @@ Read episode metadata, result and action trace before diagnosing. Inspect video
 beginning/end and the latest camera stills when available; use additional frames
 near relevant actions. Images arrive as image content from `view_frame`.
 
+`derived-facts.json` is indexed evidence the harness computed for you: arithmetic
+over the executor trace and `actions.jsonl` in this same folder. It is not a new
+measurement and not privileged simulator state, so it cannot establish contact,
+a grasp or drawer displacement. It supplies three things you must not recompute
+by hand: per-`move_by` commanded versus achieved displacement with a ratio, a
+gripper command summary over every logged step, and a tool call inventory. Cite
+it as `derived-facts.json` alongside the raw file a claim rests on. Where a
+`reason` field appears instead of values, extraction failed: report those facts
+as unavailable rather than inferring them, exactly as with skill-load events.
+A `ratio` of `null` means the commanded displacement was zero, not that the arm
+did not move.
+
 `actions.jsonl` records low-level control vectors, not high-level executor calls.
 Only an actual executor trace can establish which tools were called, their
 returns or which skills were loaded. Keep physics steps, tool calls and video
@@ -83,12 +95,23 @@ sparse, and every claim about skill loading has an executor-trace citation.
 Use the line numbers returned by read_evidence, not guessed field positions.
 
 For an Inspect experiment, also check these common proposal errors:
-- Count actual calls, including give_up, rather than equating the configured
-  maximum with calls consumed. Giving up near the limit is not exhausting it.
-- Compare at least one commanded delta with the before/after measured EEF
-  positions. A 0.30 m command that achieved about 0.08 m does not justify a
-  procedure predicting 0.30 m travel on the next call. Use bounded corrections
-  from measured progress; avoid a guessed open-loop arrival schedule.
+- Take call counts from `derived-facts.json` (`tool_calls.counts` and `total`,
+  which include give_up) rather than equating the configured maximum with calls
+  consumed. Giving up near the limit is not exhausting it.
+- Take commanded versus achieved displacement from `derived-facts.json`
+  (`motion.calls`); do not re-derive it from the trace by hand. A 0.30 m command
+  that achieved about 0.08 m does not justify a procedure predicting 0.30 m
+  travel on the next call. Quote the measured ratios when you argue about lag,
+  and keep commanded, achieved and any visual hypothesis distinct in the
+  diagnosis. Use bounded corrections from measured progress; avoid a guessed
+  open-loop arrival schedule. The ratios establish that achieved motion lagged
+  the command; they do not establish why, so do not assert a cause — obstruction,
+  controller settling, step budgeting and command scaling are alternatives the
+  episode does not separate.
+- Take the gripper history from `derived-facts.json` (`gripper`). If
+  `close_ever_commanded` is false, no grasp was attempted anywhere in the
+  episode, so the episode carries no evidence about grasping and a diagnosis
+  must not claim a grasp or contact failure.
 - Do not put numerical handle coordinates inferred only from executor hindsight
   into a skill as established scene layout. Treat pull direction and camera-axis
   mapping as hypotheses unless independent images/state changes establish them.

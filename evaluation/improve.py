@@ -32,6 +32,13 @@ from dotenv import dotenv_values
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
+INSPECT_POLICY = "inspect-robots-agent"
+DERIVED_NOTE = (
+    "Computed by the harness from the other files in this evidence folder: arithmetic "
+    "over the executor trace and actions.jsonl. It is not a new measurement and not "
+    "privileged simulator state. A 'reason' field means extraction failed; treat the "
+    "corresponding facts as unavailable rather than inferring them."
+)
 SCHEMA = {
     "type": "object",
     "properties": {
@@ -64,6 +71,131 @@ def api_key(root=ROOT):
     if not isinstance(key, str) or not key.strip():
         raise ValueError("Set CLAUDE_API_KEY in the environment or repository .env")
     return key.strip()
+
+
+def trace_sequence(messages):
+    """Interleave observed end-effector positions and tool calls in trace order."""
+    sequence = []
+    for message in messages:
+        if message.get("role") == "user":
+            content = message.get("content")
+            for block in content if isinstance(content, list) else []:
+                text = block.get("text", "") if isinstance(block, dict) else ""
+                found = re.search(r"state\[eef_pos\]: \[([-\d.,\s]+)\]", text)
+                if found:
+                    sequence.append(("observation", [float(x) for x in found.group(1).split(",")]))
+                    break
+        for entry in message.get("tool_calls") or []:
+            function = entry.get("function") or {}
+            arguments = function.get("arguments")
+            for _ in range(3):  # The adapter has emitted a doubly encoded payload.
+                if not isinstance(arguments, str):
+                    break
+                arguments = json.loads(arguments)
+            sequence.append(("call", function.get("name"), arguments))
+    return sequence
+
+
+def motion_facts(messages):
+    """Pair each move_by with the measured positions bracketing it."""
+    sequence = trace_sequence(messages)
+    calls, position, ordinal, counts = [], None, 0, {}
+    for offset, entry in enumerate(sequence):
+        if entry[0] == "observation":
+            position = entry[1]
+            continue
+        ordinal += 1
+        name, arguments = entry[1], entry[2]
+        counts[name] = counts.get(name, 0) + 1
+        if name != "move_by":
+            continue
+        deltas = arguments.get("deltas") if isinstance(arguments, dict) else None
+        deltas = deltas if isinstance(deltas, dict) else {}
+        commanded = [float(deltas.get(axis) or 0.0) for axis in ("dx", "dy", "dz")]
+        record = {"call_index": ordinal, "tool": name, "commanded": commanded}
+        following = next((e[1] for e in sequence[offset + 1 :] if e[0] == "observation"), None)
+        if position is None or following is None:
+            record.update(
+                achieved=None,
+                ratio=None,
+                note="No measured position on both sides of this call.",
+            )
+        else:
+            achieved = [round(following[axis] - position[axis], 6) for axis in range(3)]
+            commanded_norm = math.sqrt(sum(x * x for x in commanded))
+            achieved_norm = math.sqrt(sum(x * x for x in achieved))
+            record.update(
+                achieved=achieved,
+                commanded_norm=round(commanded_norm, 6),
+                achieved_norm=round(achieved_norm, 6),
+                ratio=round(achieved_norm / commanded_norm, 2) if commanded_norm > 1e-9 else None,
+            )
+            if commanded_norm <= 1e-9:
+                record["note"] = "Commanded displacement was zero; no ratio is defined."
+        calls.append(record)
+    return calls, {"total": ordinal, "counts": counts}
+
+
+def gripper_facts(episode):
+    """Summarise the commanded gripper channel across every logged physics step."""
+    rows = [
+        json.loads(line)
+        for line in (episode / "actions.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    values = [float(row["action"][-1]) for row in rows]
+    return {
+        "rows": len(rows),
+        "distinct_commands": sorted(set(values)),
+        "first": values[0] if values else None,
+        "last": values[-1] if values else None,
+        "close_ever_commanded": any(value > 0 for value in values),
+        "convention": "grip -1 commands OPEN, +1 commands CLOSE; a command is not a measured grasp.",
+    }
+
+
+def derive_facts(episode, trace, result):
+    """Arithmetic over the raw artifacts. Never raises: the loop depends on it."""
+    episode = Path(episode)
+    facts = {"note": DERIVED_NOTE, "policy": result.get("policy")}
+    try:
+        facts["gripper"] = gripper_facts(episode)
+    except (OSError, ValueError, TypeError, KeyError, IndexError) as exc:
+        facts["gripper"] = {"reason": f"actions.jsonl could not be read ({type(exc).__name__})"}
+    if result.get("policy") != INSPECT_POLICY:
+        # The four-tool executor writes a different trace shape; do not guess at it.
+        unavailable = "unsupported_policy"
+    elif trace is None:
+        unavailable = "no executor trace was supplied"
+    else:
+        unavailable = None
+    if unavailable is None:
+        try:
+            calls, inventory = motion_facts(json.loads(Path(trace).read_text()))
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, IndexError) as exc:
+            unavailable = f"executor trace could not be parsed ({type(exc).__name__})"
+        else:
+            facts["tool_calls"] = inventory
+            facts["motion"] = (
+                {"calls": calls} if calls else {"reason": "the trace contains no move_by calls"}
+            )
+    if unavailable is not None:
+        facts["motion"] = {"reason": unavailable}
+        facts["tool_calls"] = {"reason": unavailable}
+    return facts
+
+
+def headline_facts(facts):
+    """The few numbers worth putting in the agent's opening prompt."""
+    calls = facts.get("motion", {}).get("calls") or []
+    ratios = [call["ratio"] for call in calls if call.get("ratio") is not None]
+    return {
+        "move_calls_compared": len(calls),
+        "ratio_range": [min(ratios), max(ratios)] if ratios else None,
+        "near_zero_achieved_calls": sum(1 for ratio in ratios if ratio < 0.05),
+        "tool_call_counts": facts.get("tool_calls", {}).get("counts"),
+        "close_ever_commanded": facts.get("gripper", {}).get("close_ever_commanded"),
+    }
 
 
 def prepare_evidence(episode, output, kind, skills=None, trace=None, context=None):
@@ -104,16 +236,31 @@ def prepare_evidence(episode, output, kind, skills=None, trace=None, context=Non
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(path, target)
         index[name] = hashlib.sha256(target.read_bytes()).hexdigest()
+    facts = derive_facts(episode, trace, result)
+    derived = output / "evidence" / "derived-facts.json"
+    derived.write_text(json.dumps(facts, indent=2) + "\n")
+    index["derived-facts.json"] = hashlib.sha256(derived.read_bytes()).hexdigest()
     manifest = {
         "source_episode": str(episode),
         "kind": kind,
         "split": "development",
         "fixture": kind == "smoke" or result.get("policy") == "noop",
         "benchmark": result,
+        "derived_facts": headline_facts(facts),
         "files_sha256": index,
         "missing_evidence": ["Measured joint displacement/contact forces are not supplied."]
         + ([] if trace else ["No executor trace: tool returns and loaded skills are unknown."])
-        + ([] if skills else ["No incumbent skill snapshot supplied."]),
+        + ([] if skills else ["No incumbent skill snapshot supplied."])
+        + (
+            []
+            if "calls" in facts["motion"]
+            else [f"No commanded-versus-achieved comparison: {facts['motion']['reason']}."]
+        )
+        + (
+            []
+            if "reason" not in facts["gripper"]
+            else [f"No gripper command summary: {facts['gripper']['reason']}."]
+        ),
     }
     (output / "evidence.json").write_text(json.dumps(manifest, indent=2) + "\n")
     return manifest
@@ -261,8 +408,9 @@ async def run_agent(output, manifest, key, model="sonnet", budget=0.5, turns=8, 
         async with asyncio.timeout(timeout):
             async with ClaudeSDKClient(options=options) as client:
                 await client.query(
-                    "Inspect this development episode. Read its actions and inspect "
-                    "at least one image/video frame before reporting.\n" + json.dumps(manifest)
+                    "Inspect this development episode. Read derived-facts.json and its "
+                    "actions, and inspect at least one image/video frame before "
+                    "reporting.\n" + json.dumps(manifest)
                 )
                 async for message in client.receive_response():
                     if isinstance(message, AssistantMessage):

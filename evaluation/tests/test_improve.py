@@ -1,6 +1,7 @@
 """Evidence boundaries and improvement output, without API calls or simulation."""
 
 import asyncio
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -204,3 +205,169 @@ def test_sdk_result_is_saved_without_promoting_or_leaking_key(
     assert not (output / "skills").exists()
     assert "test-secret" not in (output / "usage.json").read_text()
     assert (episode / "result.json").read_text() == (output / "evidence/result.json").read_text()
+
+
+# --- Deterministic derived facts -------------------------------------------------
+# The traces below are synthetic fixtures: hand-written messages with known
+# arithmetic, used to prove the extractor's numbers. They are not recorded episodes.
+
+
+def observation(position):
+    text = (
+        "Current observation.\nInstruction: open the middle drawer of the cabinet\n"
+        f"state[eef_pos]: [{position[0]}, {position[1]}, {position[2]}]\n"
+        "state[finger_qpos]: [0.0387, -0.0387]"
+    )
+    return {"role": "user", "content": [{"type": "text", "text": text}]}
+
+
+def call(name, deltas=None, double_encoded=False):
+    arguments = json.dumps({"deltas": deltas} if deltas is not None else {})
+    if double_encoded:  # The real adapter has produced a doubly encoded payload.
+        arguments = json.dumps(arguments)
+    function = {"name": name, "arguments": arguments}
+    return {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [{"id": "t", "type": "function", "function": function}],
+    }
+
+
+def synthetic_trace():
+    """Two moves achieving a 0.20 ratio, one zero-norm move, then give_up."""
+    return [
+        {"role": "system", "content": "You are controlling a robot."},
+        {"role": "user", "content": "Goal: open the middle drawer of the cabinet"},
+        observation([0.0, 0.0, 1.0]),
+        call("move_by", {"dy": -0.1}),
+        observation([0.0, -0.02, 1.0]),
+        call("move_by", {"dz": -0.05}, double_encoded=True),
+        observation([0.0, -0.02, 0.99]),
+        call("move_by", {"dx": 0.0}),
+        observation([0.0, -0.02, 0.99]),
+        call("give_up"),
+    ]
+
+
+@pytest.fixture
+def inspect_episode(tmp_path):
+    path = tmp_path / "inspect-episode"
+    path.mkdir()
+    (path / "result.json").write_text(
+        json.dumps(
+            {
+                "init_state_id": 0,
+                "success": False,
+                "policy": "inspect-robots-agent",
+                "error": None,
+                "steps": 3,
+            }
+        )
+    )
+    (path / "episode.json").write_text('{"instruction": "open the middle drawer"}')
+    rows = [{"step": i + 1, "action": [0, -0.1, 0, 0, 0, 0, -1.0]} for i in range(3)]
+    (path / "actions.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    (path / "executor-trace.json").write_text(json.dumps(synthetic_trace()))
+    Image.new("RGB", (8, 8), "blue").save(path / "0001-agentview.png")
+    return path
+
+
+def facts_for(episode, trace=True):
+    result = json.loads((episode / "result.json").read_text())
+    path = episode / "executor-trace.json" if trace else None
+    return improve.derive_facts(episode, path, result)
+
+
+def test_commanded_and_achieved_are_paired_with_ratios(inspect_episode):
+    moves = facts_for(inspect_episode)["motion"]["calls"]
+    assert [m["ratio"] for m in moves] == [0.2, 0.2, None]
+    assert moves[0]["commanded"] == [0.0, -0.1, 0.0]
+    assert moves[0]["achieved"] == [0.0, -0.02, 0.0]
+    assert moves[0]["tool"] == "move_by"
+
+
+def test_tool_inventory_counts_give_up(inspect_episode):
+    inventory = facts_for(inspect_episode)["tool_calls"]
+    assert inventory["total"] == 4
+    assert inventory["counts"] == {"move_by": 3, "give_up": 1}
+
+
+def test_open_gripper_throughout_is_reported_as_no_close(inspect_episode):
+    gripper = facts_for(inspect_episode)["gripper"]
+    assert gripper["close_ever_commanded"] is False
+    assert gripper["distinct_commands"] == [-1.0]
+    assert gripper["rows"] == 3
+
+
+def test_close_command_is_detected(inspect_episode):
+    rows = [
+        {"step": 1, "action": [0, 0, 0, 0, 0, 0, -1.0]},
+        {"step": 2, "action": [0, 0, 0, 0, 0, 0, 1.0]},
+    ]
+    (inspect_episode / "actions.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    gripper = facts_for(inspect_episode)["gripper"]
+    assert gripper["close_ever_commanded"] is True
+    assert gripper["distinct_commands"] == [-1.0, 1.0]
+
+
+def test_missing_trace_keeps_gripper_facts_and_explains_motion(inspect_episode):
+    facts = facts_for(inspect_episode, trace=False)
+    assert facts["gripper"]["rows"] == 3
+    assert facts["motion"]["reason"]
+    assert "calls" not in facts["motion"]
+
+
+def test_malformed_trace_does_not_raise(inspect_episode):
+    (inspect_episode / "executor-trace.json").write_text("this is not json{{{")
+    facts = facts_for(inspect_episode)
+    assert facts["motion"]["reason"]
+    assert facts["gripper"]["rows"] == 3
+
+
+def test_other_executor_policy_is_not_parsed_as_inspect(inspect_episode):
+    result = json.loads((inspect_episode / "result.json").read_text())
+    result["policy"] = "noop"
+    facts = improve.derive_facts(inspect_episode, inspect_episode / "executor-trace.json", result)
+    assert facts["motion"]["reason"] == "unsupported_policy"
+    assert facts["gripper"]["rows"] == 3
+
+
+def test_unreadable_actions_do_not_raise(inspect_episode):
+    (inspect_episode / "actions.jsonl").write_text("not jsonl at all\n")
+    facts = facts_for(inspect_episode)
+    assert facts["gripper"]["reason"]
+    assert facts["motion"]["calls"]
+
+
+def test_derived_facts_are_indexed_evidence(inspect_episode, tmp_path):
+    output = tmp_path / "improve"
+    manifest = improve.prepare_evidence(
+        inspect_episode,
+        output,
+        "agent",
+        trace=inspect_episode / "executor-trace.json",
+    )
+    assert "derived-facts.json" in manifest["files_sha256"]
+    text = improve.read_evidence(output, manifest["files_sha256"], "derived-facts.json")
+    assert "ratio" in text
+    headline = manifest["derived_facts"]
+    assert headline["close_ever_commanded"] is False
+    assert headline["tool_call_counts"] == {"move_by": 3, "give_up": 1}
+    assert headline["ratio_range"] == [0.2, 0.2]
+
+
+def test_derived_facts_digest_matches_written_file(inspect_episode, tmp_path):
+    output = tmp_path / "improve"
+    manifest = improve.prepare_evidence(
+        inspect_episode,
+        output,
+        "agent",
+        trace=inspect_episode / "executor-trace.json",
+    )
+    written = (output / "evidence" / "derived-facts.json").read_bytes()
+    assert hashlib.sha256(written).hexdigest() == manifest["files_sha256"]["derived-facts.json"]
+
+
+def test_unavailable_motion_facts_are_listed_as_missing_evidence(inspect_episode, tmp_path):
+    manifest = improve.prepare_evidence(inspect_episode, tmp_path / "improve", "agent")
+    assert any("commanded" in value.lower() for value in manifest["missing_evidence"])
