@@ -1,6 +1,5 @@
-"""Tool-layer tests. No LIBERO, no MuJoCo: a fake robot with the same four methods."""
+"""Tool dispatch tests. No LIBERO, no MuJoCo: a fake robot with the same four methods."""
 
-import asyncio
 import base64
 import json
 
@@ -8,12 +7,12 @@ import jsonschema
 import pytest
 
 from harness.tools import (
-    ALLOWED_TOOLS,
     GRIPPER_SCHEMA,
     MOVE_TO_SCHEMA,
     STEP_SCHEMA,
+    TOOL_DEFS,
     TOOL_NAMES,
-    build_robot_tools,
+    dispatch,
 )
 
 PNG = base64.standard_b64decode(
@@ -28,6 +27,7 @@ class FakeRobot:
         self.tmp_path = tmp_path
         self.raises = raises
         self.calls = []
+        self.done = False
         for camera in ("agentview", "robot0_eye_in_hand"):
             (tmp_path / f"{camera}.png").write_bytes(PNG)
 
@@ -39,6 +39,8 @@ class FakeRobot:
                 for camera in ("agentview", "robot0_eye_in_hand")
             },
             eef_pos=[0.0, 0.0, 1.0],
+            eef_quat_xyzw=[0.0, 0.0, 0.0, 1.0],
+            gripper_qpos=[0.04, -0.04],
             steps=3,
             remaining_steps=497,
             success=False,
@@ -68,36 +70,9 @@ class FakeRobot:
         return self._payload()
 
 
-def tools_by_name(robot):
-    return {item.name: item for item in build_robot_tools(robot)}
-
-
-def call(robot, name, args):
-    return asyncio.run(tools_by_name(robot)[name].handler(args))
-
-
-def test_allowed_tool_names_are_namespaced(tmp_path):
-    assert ALLOWED_TOOLS == [f"mcp__robot__{name}" for name in TOOL_NAMES]
-    assert set(TOOL_NAMES) == set(tools_by_name(FakeRobot(tmp_path)))
-
-
-@pytest.mark.parametrize(
-    ("schema", "minimal"),
-    [
-        (MOVE_TO_SCHEMA, {"xyz": [0.0, 0.0, 1.0]}),
-        (GRIPPER_SCHEMA, {"closed": True}),
-        (STEP_SCHEMA, {"action": [0.0] * 7}),
-    ],
-)
-def test_budget_arguments_are_optional_in_the_wire_schema(schema, minimal):
-    # The SDK validates arguments against these before the handler runs, and its
-    # dict shorthand would have marked every parameter required.
-    jsonschema.validate(instance=minimal, schema=schema)
-
-
-def test_schema_rejects_out_of_range_action():
-    with pytest.raises(jsonschema.ValidationError):
-        jsonschema.validate(instance={"action": [9.0] * 7}, schema=STEP_SCHEMA)
+def test_tool_definitions_cover_every_tool():
+    assert [tool["name"] for tool in TOOL_DEFS] == list(TOOL_NAMES)
+    assert all(tool["description"] and tool["input_schema"] for tool in TOOL_DEFS)
 
 
 @pytest.mark.parametrize(
@@ -110,30 +85,30 @@ def test_schema_rejects_out_of_range_action():
     ],
 )
 def test_every_tool_returns_facts_plus_both_camera_images(tmp_path, name, args):
-    result = call(FakeRobot(tmp_path), name, args)
+    content, is_error = dispatch(FakeRobot(tmp_path), name, args)
 
-    assert result.get("is_error") is not True
-    images = [block for block in result["content"] if block["type"] == "image"]
+    assert is_error is False
+    images = [block for block in content if block["type"] == "image"]
     assert len(images) == 2
-    assert all(block["mimeType"] == "image/png" for block in images)
-    assert all(base64.standard_b64decode(block["data"]) == PNG for block in images)
+    assert all(block["source"]["media_type"] == "image/png" for block in images)
+    assert all(base64.standard_b64decode(block["source"]["data"]) == PNG for block in images)
 
-    facts = json.loads(result["content"][0]["text"])
+    facts = json.loads(content[0]["text"])
     assert facts["remaining_steps"] == 497
     assert facts["success"] is False
 
 
 def test_text_block_carries_no_filesystem_paths(tmp_path):
-    result = call(FakeRobot(tmp_path), "observe", {})
-    assert "images" not in json.loads(result["content"][0]["text"])
-    assert str(tmp_path) not in result["content"][0]["text"]
+    content, _ = dispatch(FakeRobot(tmp_path), "observe", {})
+    assert "images" not in json.loads(content[0]["text"])
+    assert str(tmp_path) not in content[0]["text"]
 
 
 def test_optional_arguments_fall_back_to_robot_defaults(tmp_path):
     robot = FakeRobot(tmp_path)
-    call(robot, "move_to", {"xyz": [0.0, 0.0, 1.0]})
-    call(robot, "gripper", {"closed": False})
-    call(robot, "step", {"action": [0.0] * 7})
+    dispatch(robot, "move_to", {"xyz": [0.0, 0.0, 1.0]})
+    dispatch(robot, "gripper", {"closed": False})
+    dispatch(robot, "step", {"action": [0.0] * 7})
 
     assert robot.calls == [
         ("move_to", {"xyz": [0.0, 0.0, 1.0], "max_steps": 60}),
@@ -144,8 +119,8 @@ def test_optional_arguments_fall_back_to_robot_defaults(tmp_path):
 
 def test_explicit_arguments_are_passed_through(tmp_path):
     robot = FakeRobot(tmp_path)
-    call(robot, "move_to", {"xyz": [0.1, 0.2, 0.9], "max_steps": 20})
-    call(robot, "step", {"action": [0.0] * 7, "repeat": 5})
+    dispatch(robot, "move_to", {"xyz": [0.1, 0.2, 0.9], "max_steps": 20})
+    dispatch(robot, "step", {"action": [0.0] * 7, "repeat": 5})
 
     assert robot.calls == [
         ("move_to", {"xyz": [0.1, 0.2, 0.9], "max_steps": 20}),
@@ -155,8 +130,75 @@ def test_explicit_arguments_are_passed_through(tmp_path):
 
 def test_robot_errors_become_readable_tool_errors(tmp_path):
     robot = FakeRobot(tmp_path, raises=ValueError("All action values must be in [-1, 1]"))
-    result = call(robot, "step", {"action": [9.0] * 7})
+    content, is_error = dispatch(robot, "step", {"action": [9.0] * 7})
 
-    assert result["is_error"] is True
-    assert "ValueError" in result["content"][0]["text"]
-    assert "must be in [-1, 1]" in result["content"][0]["text"]
+    assert is_error is True
+    assert "ValueError" in content[0]["text"]
+    assert "must be in [-1, 1]" in content[0]["text"]
+
+
+def test_unknown_tool_is_an_error_not_a_crash(tmp_path):
+    content, is_error = dispatch(FakeRobot(tmp_path), "teleport", {})
+    assert is_error is True
+    assert "teleport" in content[0]["text"]
+
+
+@pytest.mark.parametrize(
+    ("schema", "minimal"),
+    [
+        (MOVE_TO_SCHEMA, {"xyz": [0.0, 0.0, 1.0]}),
+        (GRIPPER_SCHEMA, {"closed": True}),
+        (STEP_SCHEMA, {"action": [0.0] * 7}),
+    ],
+)
+def test_budget_arguments_are_optional_in_the_schema(schema, minimal):
+    jsonschema.validate(instance=minimal, schema=schema)
+
+
+def test_schema_rejects_out_of_range_action():
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance={"action": [9.0] * 7}, schema=STEP_SCHEMA)
+
+
+def test_tool_results_carry_the_gripper_body_block(tmp_path):
+    content, _ = dispatch(FakeRobot(tmp_path), "observe", {})
+    body = json.loads(content[0]["text"])["body"]
+
+    assert body["jaw_axis"] == [1.0, 0.0, 0.0]
+    assert body["jaw_opening_m"] == 0.08
+    assert body["jaw_max_opening_m"] == 0.08
+
+
+def test_body_block_is_omitted_when_the_robot_reports_no_pose(tmp_path):
+    robot = FakeRobot(tmp_path)
+    original = robot.observe
+
+    def poseless():
+        payload = original()
+        del payload["eef_quat_xyzw"]
+        return payload
+
+    robot.observe = poseless
+    content, _ = dispatch(robot, "observe", {})
+    assert "body" not in json.loads(content[0]["text"])
+
+
+def test_timing_dict_splits_simulation_from_image_encoding(tmp_path):
+    timing = {}
+    dispatch(FakeRobot(tmp_path), "observe", {}, timing)
+
+    assert timing["sim_seconds"] >= 0
+    assert timing["encode_seconds"] >= 0
+    assert timing["seconds"] == pytest.approx(
+        timing["sim_seconds"] + timing["encode_seconds"], abs=1e-6
+    )
+
+
+def test_timing_dict_is_filled_in_even_when_the_robot_fails(tmp_path):
+    robot = FakeRobot(tmp_path, raises=RuntimeError("boom"))
+    timing = {}
+    _content, is_error = dispatch(robot, "observe", {}, timing)
+
+    assert is_error is True
+    assert timing["seconds"] >= 0
+    assert timing["encode_seconds"] == pytest.approx(0, abs=1e-3)

@@ -1,36 +1,24 @@
 """Terminal console: natural-language input, translated into LIBERO robot tool calls.
 
-    uv run -m harness.repl --task 0 --state 0
+    uv run -m harness.repl --task 0 --state 0 --fast
 
-One `Robot` and one SDK session for the whole console, so the agent keeps the scene in
-context across turns. All robot calls happen on the event-loop thread that constructed
-the robot; only stdin is read on a worker thread.
+One `Robot` and one conversation for the whole console, so the agent keeps the scene
+in context across turns. Everything runs on one thread, which is what `Robot`'s
+OpenGL context requires.
 """
 
 import argparse
-import asyncio
-import dataclasses
 import json
 import sys
 import time
 
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ClaudeSDKClient,
-    CLINotFoundError,
-    ResultMessage,
-    TextBlock,
-    ToolResultBlock,
-    ToolUseBlock,
-    UserMessage,
-)
-from claude_agent_sdk import __version__ as sdk_version
+import anthropic
 
+from harness.agent import FAST_MODE_MODELS, RobotAgent
 from harness.env import DEFAULT_PATH as DEFAULT_ENV_PATH
 from harness.env import load_dotenv
 from harness.prompt import build_prompt
-from harness.tools import ALLOWED_TOOLS, build_robot_server
+from harness.tools import TOOL_DEFS
 
 BANNER = """\
 Robot console. Type an instruction, or /help for commands.
@@ -41,11 +29,11 @@ HELP = """\
   /help     this message
   /status   episode result so far (steps, success, termination)
   /budget   remaining control steps
+  /usage    tokens and requests so far
+  /timing   where the wall clock went: model vs simulator
   /quit     end the session
 Anything else is sent to the agent.
 """
-
-FACT_KEYS = ("steps", "remaining_steps", "reached", "position_error", "success", "done")
 
 
 def parse_args(argv=None):
@@ -62,77 +50,90 @@ def parse_args(argv=None):
         help="also expose object poses; label such runs as state-assisted",
     )
     parser.add_argument("--model", default="claude-opus-5")
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help=f"fast mode: up to 2.5x output speed at premium pricing ({', '.join(FAST_MODE_MODELS)} only)",
+    )
+    parser.add_argument(
+        "--effort",
+        choices=("low", "medium", "high", "xhigh", "max"),
+        default=None,
+        help="thinking depth and token spend (API default: high)",
+    )
     parser.add_argument("--max-turns", type=int, default=40, help="model turns per instruction")
-    parser.add_argument("--max-budget-usd", type=float, default=None)
+    parser.add_argument("--quiet", action="store_true", help="show only the tool trace")
     return parser.parse_args(argv)
 
 
-def _scrub(value):
-    """Drop base64 image payloads so the log stays readable."""
-    if isinstance(value, dict):
-        if value.get("type") == "image":
-            return {**value, "data": f"<{len(value.get('data', ''))} base64 chars>"}
-        return {key: _scrub(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_scrub(item) for item in value]
-    return value
-
-
-def _log(path, message):
-    record = _scrub(dataclasses.asdict(message) if dataclasses.is_dataclass(message) else message)
+def log_event(path, kind, payload, started):
+    """Append one event with both a wall-clock stamp and seconds since the run began."""
     with path.open("a") as stream:
-        stream.write(json.dumps({"kind": type(message).__name__, "message": record}, default=str) + "\n")
+        stream.write(
+            json.dumps(
+                {
+                    "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "elapsed": round(time.monotonic() - started, 3),
+                    "kind": kind,
+                    "payload": payload,
+                },
+                default=str,
+            )
+            + "\n"
+        )
 
 
-def _summarize_tool_result(block):
-    """One line of the facts a tool returned, ignoring the images."""
-    content = block.content if isinstance(block.content, list) else []
-    for item in content:
-        if item.get("type") != "text":
-            continue
-        try:
-            facts = json.loads(item["text"])
-        except (ValueError, KeyError):
-            continue
-        if not isinstance(facts, dict):
-            continue
-        parts = [f"{key}={facts[key]}" for key in FACT_KEYS if key in facts]
-        return " ".join(parts)
-    if isinstance(block.content, str):
-        return block.content.strip().splitlines()[0] if block.content.strip() else ""
-    return ""
+def rounded(timing):
+    """The timing dict with every second rounded to something readable."""
+    out = {}
+    for key, value in timing.items():
+        if isinstance(value, dict):
+            out[key] = rounded(value)
+        else:
+            out[key] = round(value, 3) if isinstance(value, float) else value
+    return out
 
 
-async def _drain(client, log_path, usage):
-    """Print one agent response, logging every message."""
-    async for message in client.receive_response():
-        _log(log_path, message)
-        if isinstance(message, AssistantMessage):
-            for block in message.content:
-                if isinstance(block, TextBlock) and block.text.strip():
-                    print(block.text.strip())
-                elif isinstance(block, ToolUseBlock):
-                    print(f"  → {block.name.split('__')[-1]}({json.dumps(block.input)})")
-        elif isinstance(message, UserMessage) and isinstance(message.content, list):
-            for block in message.content:
-                if isinstance(block, ToolResultBlock):
-                    summary = _summarize_tool_result(block)
-                    marker = "!" if block.is_error else " "
-                    if summary:
-                        print(f"  {marker} {summary}")
-        elif isinstance(message, ResultMessage):
-            usage["turns"] = usage.get("turns", 0) + message.num_turns
-            if message.total_cost_usd is not None:
-                usage["cost_usd"] = usage.get("cost_usd", 0.0) + message.total_cost_usd
-            usage["last_session_id"] = message.session_id
-            if message.is_error:
-                print(f"  ! session error: {message.subtype} {message.errors or ''}")
+def timing_line(before, after):
+    """One line splitting an instruction's wall clock into model and simulator."""
+    wall, api, sim, encode = (
+        after[key] - before[key]
+        for key in ("wall_seconds", "api_seconds", "sim_seconds", "encode_seconds")
+    )
+    requests = after["api_calls"] - before["api_calls"]
+    calls = after["tool_calls"] - before["tool_calls"]
+    return (
+        f"  ⏱ {wall:.1f}s total = {api:.1f}s model ({requests} request{'s'[: requests != 1]}) "
+        f"+ {sim:.1f}s sim ({calls} tool call{'s'[: calls != 1]}) "
+        f"+ {encode:.1f}s image encode + {wall - api - sim - encode:.1f}s other"
+    )
 
 
-async def run(args):
+def render(agent, log_path, message, quiet, started):
+    """Print one instruction's events and log all of them."""
+    before = dict(agent.timing)
+    for kind, payload in agent.send(message):
+        log_event(log_path, kind, payload, started)
+        if kind == "text" and not quiet:
+            print(payload)
+        elif kind == "api":
+            print(f"  ~ model {payload:.1f}s")
+        elif kind == "tool_use":
+            name, args = payload
+            print(f"  → {name}({json.dumps(args)})")
+        elif kind == "tool_result":
+            name, summary, is_error, seconds = payload
+            print(f"  {'!' if is_error else ' '} {summary} [{seconds:.1f}s]".rstrip())
+        elif kind == "stop" and payload not in ("end_turn", "episode_done"):
+            print(f"  [stopped: {payload}]")
+    print(timing_line(before, agent.timing))
+
+
+def run(args):
     from simulation.sim import Robot
 
     output = args.output or f"runs/repl-{time.strftime('%Y%m%d-%H%M%S')}"
+    started = time.monotonic()
     with Robot(
         suite=args.suite,
         task_id=args.task,
@@ -145,47 +146,52 @@ async def run(args):
         run_dir = robot.output
         log_path = run_dir / "harness_log.jsonl"
         system_prompt = build_prompt(robot.metadata)
-        options = ClaudeAgentOptions(
-            system_prompt=system_prompt,
+        agent = RobotAgent(
+            robot,
+            system_prompt,
             model=args.model,
-            mcp_servers={"robot": build_robot_server(robot)},
-            strict_mcp_config=True,
-            tools=[],  # no built-in tools; the robot server is the whole surface
-            allowed_tools=ALLOWED_TOOLS,
-            setting_sources=[],  # no project/user settings, no skill auto-discovery
-            skills=None,
+            fast=args.fast,
+            effort=args.effort,
             max_turns=args.max_turns,
-            max_budget_usd=args.max_budget_usd,
-            cwd=str(run_dir),
         )
+        if agent.fast_disabled_reason:
+            print(f"Note: {agent.fast_disabled_reason}")
 
         print(BANNER.format(instruction=robot.metadata["instruction"]))
-        print(f"Run directory: {run_dir}\n")
-        usage = {}
-        loop = asyncio.get_running_loop()
+        speed = "fast" if agent.fast else "standard"
+        print(f"Model: {args.model} ({speed})   Run directory: {run_dir}\n")
 
-        async with ClaudeSDKClient(options=options) as client:
-            while not robot.done:
-                try:
-                    line = (await loop.run_in_executor(None, input, "> ")).strip()
-                except (EOFError, KeyboardInterrupt):
-                    print()
-                    break
-                if not line:
-                    continue
-                if line in ("/quit", "/exit"):
-                    break
-                if line == "/help":
-                    print(HELP)
-                    continue
-                if line == "/status":
-                    print(json.dumps(robot.result(), indent=2))
-                    continue
-                if line == "/budget":
-                    print(f"{robot.max_steps - robot.steps} of {robot.max_steps} control steps left")
-                    continue
-                await client.query(line)
-                await _drain(client, log_path, usage)
+        while not robot.done:
+            try:
+                line = input("> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if not line:
+                continue
+            if line in ("/quit", "/exit"):
+                break
+            if line == "/help":
+                print(HELP)
+                continue
+            if line == "/status":
+                print(json.dumps(robot.result(), indent=2))
+                continue
+            if line == "/budget":
+                print(f"{robot.max_steps - robot.steps} of {robot.max_steps} control steps left")
+                continue
+            if line == "/usage":
+                print(json.dumps(agent.usage, indent=2))
+                continue
+            if line == "/timing":
+                print(json.dumps(rounded(agent.timing), indent=2))
+                continue
+            try:
+                render(agent, log_path, line, args.quiet, started)
+            except anthropic.APIStatusError as exc:
+                print(f"  ! API error {exc.status_code}: {exc.message}", file=sys.stderr)
+            except anthropic.APIConnectionError:
+                print("  ! network error reaching the API", file=sys.stderr)
 
         if robot.done:
             print("\nEpisode finished (success or step budget exhausted).")
@@ -194,12 +200,15 @@ async def run(args):
             json.dumps(
                 {
                     "model": args.model,
-                    "sdk_version": sdk_version,
+                    "anthropic_sdk_version": anthropic.__version__,
+                    "fast_mode": agent.fast,
+                    "fast_mode_note": agent.fast_disabled_reason,
+                    "effort": args.effort,
                     "max_turns": args.max_turns,
-                    "max_budget_usd": args.max_budget_usd,
                     "system_prompt": system_prompt,
-                    "allowed_tools": ALLOWED_TOOLS,
-                    "usage": usage,
+                    "tools": [tool["name"] for tool in TOOL_DEFS],
+                    "usage": agent.usage,
+                    "timing": rounded(agent.timing),
                     "episode": result,
                 },
                 indent=2,
@@ -219,11 +228,11 @@ def main(argv=None):
     if loaded:
         print(f"Loaded from {DEFAULT_ENV_PATH}: {', '.join(sorted(loaded))}")
     try:
-        asyncio.run(run(args))
-    except CLINotFoundError:
+        run(args)
+    except anthropic.AuthenticationError:
         print(
-            "Claude Code CLI not found. The Agent SDK drives it as a subprocess.\n"
-            "Install Node and the CLI, or point ClaudeAgentOptions.cli_path at it.",
+            "No valid Anthropic credential. Set ANTHROPIC_API_KEY in .env "
+            "(cp .env.example .env) or export it in your shell.",
             file=sys.stderr,
         )
         return 1

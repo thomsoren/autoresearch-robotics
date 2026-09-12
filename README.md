@@ -7,7 +7,7 @@ Agent skill improvement on LIBERO in MuJoCo. Python 3.11, managed with `uv`.
 ```text
 simulation/     Thomas: MuJoCo/LIBERO setup, robot tools, existing evaluation utility and tests
 docs/           setup guide, project plan and earlier skill-loop notes
-harness/        Laksiya: Claude Agent SDK robot console and skill-improvement loop
+harness/        Laksiya: Anthropic SDK robot console and skill-improvement loop
 pyproject.toml  shared uv environment
 uv.lock         pinned dependencies
 ```
@@ -44,24 +44,29 @@ not an implemented agent harness.
 
 ## Robot console
 
-A Claude Agent SDK session that translates terminal instructions into robot tool calls
+An Anthropic SDK agent loop that translates terminal instructions into robot tool calls
 against one live episode:
 
 ```bash
-uv run -m harness.repl --task 0 --state 0
+uv run -m harness.repl --task 0 --state 0 --fast
 ```
 
 Type an instruction (`open the middle drawer of the cabinet`); the agent calls
 `observe` / `move_to` / `gripper` / `step` and gets both camera images back each turn.
-`/status`, `/budget` and `/quit` are handled locally. Every run writes `episode.mp4`,
+`/status`, `/budget`, `/usage`, `/timing` and `/quit` are handled locally. Each model
+request and each tool call prints its own duration, every instruction ends with a line
+splitting its wall clock into model time, simulator time and image-encoding time, and
+`/timing` reports those totals for the session (also saved in `session.json`). Every run writes `episode.mp4`,
 `actions.jsonl`, `harness_log.jsonl` and `session.json` into its `runs/` directory.
-The session loads no project settings and no skills, so it is a clean no-skills
-condition. Requires the Claude Code CLI on PATH.
+`--fast` enables fast mode (up to 2.5x output speed at premium pricing, `claude-opus-5`
+and `claude-opus-4-8` only); `--effort` tunes thinking depth, `--quiet` hides prose and
+shows only the tool trace. The agent has no tools beyond the four robot ones, so it is a
+clean no-skills condition.
 
 Credentials come from a gitignored `.env` in the repository root, loaded at startup
 (`cp .env.example .env`, then fill in `ANTHROPIC_API_KEY`). It is picked up automatically
 when present and skipped when absent; variables already exported in your shell win over
-the file. If `claude` is already logged in, no key is needed.
+the file.
 
 ```bash
 uv run pytest harness/tests simulation/tests -q
