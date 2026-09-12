@@ -57,7 +57,7 @@ evaluation/tests/test_loop.py, new evaluation/transfer.py and tests if clearer.
 Files: docs/SETUP.md, execute/README.md, README.md, docs/IMPLEMENTATION.md.
 
 - [x] Run all offline tests and lint; run real simulator pose checks and fresh-process loop episodes.
-- [ ] Run a bounded live acting/evidence/improvement integration with standard speed.
+- [x] Run a bounded live acting/evidence/improvement integration with standard speed.
 - [x] Inspect result/actions/video artifacts and distinguish software correctness from task success.
 - [x] Review complete diff, resolve substantive findings and document reproducible commands,
   limits, measured results and remaining unverified behavior.
@@ -80,3 +80,6 @@ Files: docs/SETUP.md, execute/README.md, README.md, docs/IMPLEMENTATION.md.
   HTTP contract tests verify the effective limit and preservation of image history.
 - First full Fable loop preserved two refusal errors and an author timeout; no
   candidate was tested. Fresh follow-up uses concise output and a Sonnet author.
+- Follow-up completed all six episodes and one author pass: 0/3 versus 0/3,
+  two policy errors per condition, candidate rejected, no guide promoted.
+  Sonnet author cost $0.13599505. No learned gain or held-out transfer established.

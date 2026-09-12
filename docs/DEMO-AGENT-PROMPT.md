@@ -14,7 +14,11 @@ ASPIRE inspires this; our current ablation changes Markdown, holding execution f
 
 The acting model is Fable 5.1 (`claude-fable-5-1`) using the existing .env token.
 The skill-author model is configured separately. Do not conflate older Opus runs
-with Fable results. The active Fable loop is `runs/architecture-fable-learning-2`.
+with Fable results. The completed Fable loop is `runs/architecture-fable-learning-2`.
+It ran baseline, author, candidate tests and rejection: 0/3 successes in both
+conditions, two policy errors in each, no selected guide. Baseline/candidate
+physics steps total 919/1140; API attempts total 5/11. Sonnet author cost $0.13599505.
+Use this as the primary saved replay. It proves the workflow, not a learning gain.
 The preceding `architecture-fable-learning` run ended on an author timeout;
 it is preserved as failed-run evidence and has no tested candidate.
 
@@ -25,10 +29,10 @@ development comparisons and a separate frozen evaluation path.
 Current task: LIBERO Goal task 0, open the middle drawer. Development states
 0,1,2 only. DO NOT run states 3-7 or any model/API call. Gripper-tip work is excluded.
 
-Verified so far: real physics control tests pass, and a live acting run executed
-240 physics steps using two API calls. It FAILED the task. A live author produced
-an unvalidated candidate; inspection found scene-specific content, which the
-integration agent is addressing. No successful learned improvement is established.
+Verified: 130 tests pass, including real physics control checks. The complete
+Fable cycle generated a general guide and rejected it after fresh tests. Older
+Opus/Sonnet experiments remain available but are not part of that comparison.
+No successful learned improvement is established.
 
 ## Workspace and ownership
 
@@ -112,6 +116,10 @@ result.json counts actual physics. Video omits LLM thinking time.
 Only `result.json.success` establishes benchmark outcome. Display missing metrics
 as not measured. Label any synthetic fixture visibly; never mix it with genuine
 results. A rejected candidate still demonstrates the actual loop, not improvement.
+Use `result.json.api_requests_attempted` for request counts, including retries;
+`requests.jsonl` can omit transport exceptions and therefore undercount attempts.
+Infer tested/rejected status from comparison.json, while preserving the original
+proposal's immutable `validation_status: unvalidated` field.
 
 Deliver working demo files, verified saved-run screenshot/browser evidence,
 a launch command, a 90-second walkthrough, your commit hash, and exact integration

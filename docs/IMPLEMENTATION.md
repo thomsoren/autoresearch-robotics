@@ -125,4 +125,30 @@ two policy errors (Fable refusals). The author used the clean failed episode but
 timed out at 180 seconds before producing valid structured output. The loop is
 marked `error`; no candidate was tested or accepted. The follow-up run is
 `runs/architecture-fable-learning-2`, using brief operational-note guidance and
-a concise Sonnet author pass. Its own artifacts determine its outcome.
+a concise Sonnet author pass, completed one full iteration in 655 seconds:
+
+| Condition | LIBERO successes | Policy errors | Physics steps | API attempts |
+| --- | ---: | ---: | ---: | ---: |
+| Empty baseline | 0/3 | 2 | 919 | 5 |
+| Generated guide | 0/3 | 2 | 1140 | 11 |
+
+The decision was **reject** (tie), with no selected guide and no active-skill
+update. The author completed seven SDK turns at a recorded cost of $0.13599505.
+This demonstrates execution, evidence analysis, proposal, fresh tests and rejection.
+It does not establish a performance gain. Each condition had only one episode
+without a policy error; refusal episodes are not ordinary behavioral failures.
+No held-out state was used.
+
+The proposed guide contains no stored scene coordinates or fixed trajectory.
+Its budget ratios, direct-approach advice and visual grasp checks remain unproven
+heuristics; passing text checks does not validate its diagnosis or transferability.
+
+Fable refusals were labeled `reasoning_extraction` by the policy despite HTTP 200.
+Brief operational-note wording did not eliminate them. A separate bounded probe
+in `runs/architecture-fable-direct-check` established that Fable rejects disabled
+thinking with HTTP 400; the supported low-effort adaptive configuration remains.
+
+For API attempt counts, use `result.json.api_requests_attempted`; it includes
+transport retries. `requests.jsonl` contains received responses and usage, but
+transport exceptions can leave gaps in its request numbers. Missing response
+usage must not be presented as zero cost or zero tokens.
