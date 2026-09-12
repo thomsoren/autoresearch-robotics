@@ -5,12 +5,16 @@ Build a small working artifact viewer, not another robot/agent framework.
 
 ## Context
 
-A fixed LLM acts on camera images and measured robot pose in LIBERO. Between
-episodes, a separate LLM diagnoses execution evidence and proposes reusable
-Markdown operating knowledge. Fresh development runs test the candidate; only
-strictly higher LIBERO success counts retain it. Skills describe perception,
-action selection, verification and bounded recovery, never memorized trajectories.
-ASPIRE inspires this; our current ablation changes Markdown, holding execution fixed.
+A fixed LLM acts on calibrated RGB-D images and measured robot pose in LIBERO.
+It may query selected displayed pixels for metric visible-surface coordinates using
+the synchronized depth, intrinsics and current camera transform. This sensor advantage
+reduces monocular scale and coordinate ambiguity; it does not provide object labels,
+object centers, grasp targets or task ground truth. Between episodes, a separate LLM
+diagnoses execution evidence and proposes reusable Markdown operating knowledge. Fresh
+development runs test the candidate; only strictly higher LIBERO success counts retain
+it. Skills describe perception, action selection, verification and bounded recovery,
+never memorized trajectories. ASPIRE inspires this; our current ablation changes
+Markdown, holding execution fixed.
 
 The acting model is Fable 5.1 (`claude-fable-5-1`) using the existing .env token.
 The skill-author model is configured separately. Do not conflate older Opus runs
@@ -22,17 +26,25 @@ Use this as the primary saved replay. It proves the workflow, not a learning gai
 The preceding `architecture-fable-learning` run ended on an author timeout;
 it is preserved as failed-run evidence and has no tested candidate.
 
-The integration agent is implementing measured translation/orientation control,
-per-waypoint evidence, an evidence-only guide author, immutable snapshots,
-development comparisons and a separate frozen evaluation path.
+The implementation includes measured translation/orientation control, per-waypoint
+evidence, operational schema wording, bounded `locate_pixels` queries, an evidence-only
+guide author, immutable snapshots, development comparisons and a separate frozen
+evaluation path. A public Inspect controller discards the remainder of a motion chunk
+after measured `stalled` or `motion_limit` feedback, then requests a fresh action from
+the new observation; successful chunks continue normally.
 
 Current task: LIBERO Goal task 0, open the middle drawer. Development states
 0,1,2 only. DO NOT run states 3-7 or any model/API call. Gripper-tip work is excluded.
 
-Verified: 130 tests pass, including real physics control checks. The complete
+Verified: 151 tests pass, including real physics control and camera-geometry checks. The complete
 Fable cycle generated a general guide and rejected it after fresh tests. Older
 Opus/Sonnet experiments remain available but are not part of that comparison.
 No successful learned improvement is established.
+
+A fresh matched three-state cream-cheese baseline/candidate confirmation is running
+under `runs/cheese-confirmation`. Do not present it as a completed comparison until all
+six episodes finish, the parts are assembled, and frozen provenance validation passes.
+Calibrated depth or visible surface localization alone is not a learned-success result.
 
 ## Workspace and ownership
 
@@ -87,6 +99,9 @@ state-000/control.jsonl
 state-000/episode.mp4
 state-000/<step>-agentview.png
 state-000/<step>-robot0_eye_in_hand.png
+state-000/<step>-agentview-depth.npz
+state-000/<step>-robot0_eye_in_hand-depth.npz
+state-000/<step>-camera-geometry.json
 ```
 
 Loop layout:
@@ -112,6 +127,9 @@ requested/achieved_rotation, position_error, rotation_error, reached, stop_reaso
 gripper_command and inspect_chunk_final. They describe intermediate waypoints.
 `reached` is NOT task success. Native Inspect steps count waypoints, while our
 result.json counts actual physics. Video omits LLM thinking time.
+`locate_pixels` returns measured visible surfaces in world meters for at most eight
+integer image pixels. It does not identify objects or verify centers, contacts, grasps
+or goals; do not visualize its output as any of those claims.
 
 Only `result.json.success` establishes benchmark outcome. Display missing metrics
 as not measured. Label any synthetic fixture visibly; never mix it with genuine

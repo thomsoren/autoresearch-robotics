@@ -64,7 +64,14 @@ Results describe these selected tasks, not general robotics competence.
 
 - `execute/inspect_agent.py`: stock acting policy and pose/legacy XYZ adapters.
 - `execute/control.py`: bounded OSC feedback and rot6d validation; no scene geometry.
-- `simulation/sim.py`: actual physics, site-consistent pose, cameras, LIBERO outcome.
+- `execute/operational_policy.py`: stock policy lifecycle with clearer rot6d,
+  waypoint, note and outcome schema wording.
+- `execute/perception.py`: bounded `locate_pixels` queries over synchronized calibrated
+  depth; returns visible world-frame surfaces, not object or grasp ground truth.
+- `execute/reactive_controller.py`: public Inspect controller that discards queued
+  waypoints after measured stalls or motion limits and replans from fresh observation.
+- `simulation/sim.py`: actual physics, site-consistent pose, synchronized RGB-D,
+  observation-local camera calibration and LIBERO outcome.
 - `evaluation/improve.py` and `program.md`: read-only evidence analysis and one
   proposed general operating guide, with syntax checks against coordinate recipes.
 - `evaluation/loop.py`: immutable snapshots, complete development batches,
@@ -75,6 +82,14 @@ Results describe these selected tasks, not general robotics competence.
 residuals. `inspect_chunk_final` marks the end of a tool motion. Native Inspect
 waypoint counts/durations are NOT actual physics-step counts or wall latency.
 The videos omit LLM thinking time. No hidden model reasoning is needed for learning.
+
+Calibrated depth reduces monocular scale and frame ambiguity. `locate_pixels` reads
+one to eight integer pixels from a displayed image and its matching depth snapshot,
+then applies that observation's intrinsics and camera-to-world transform. The wrist
+transform updates as the robot moves. Invalid and background samples yield no target.
+The actor receives no object identities, centers, verified grasp points or simulator
+object state through this interface. A measured surface point does not establish
+contact, grasp, task success or learning.
 
 The proposed guide's fixed role is robot operation across tasks: interpreting
 observations, choosing bounded actions, verifying progress and recovering.
@@ -93,8 +108,10 @@ found memorized coordinates and confused waypoint accounting. That guide is NOT
 accepted or promoted. Its errors motivated stricter author instructions/checks.
 
 Real physics tests cover corrected centimetre motion, consistent quaternion frame,
-rotation with position hold, episode limits and stock Inspect pose/gripper tools
-using a mocked HTTP response. A mocked-response test is not an LLM success.
+rotation with position hold, episode limits, calibrated table-plane projection,
+moving wrist calibration and stock Inspect pose/gripper tools using a mocked HTTP
+response. Controller tests cover successful chunk continuation and stale-tail
+cancellation after measured failure. A mocked-response test is not an LLM success.
 Task success and learned gains must be read from actual complete comparisons.
 Gripper-tip testing, VLA training and a new agent framework are excluded.
 
@@ -105,7 +122,7 @@ PYTHONPATH=. .venv/bin/python -m pytest -q
 .venv/bin/ruff check .
 ```
 
-Latest full verification: **130 tests passed**, Ruff clean. The stock pose/gripper
+Latest full verification: **151 tests passed**, Ruff clean. The stock pose/gripper
 integration test uses mocked HTTP responses with real LIBERO physics.
 
 Upstream torch/robosuite deprecation warnings remain. The existing diagnosis scripts
@@ -138,6 +155,12 @@ This demonstrates execution, evidence analysis, proposal, fresh tests and reject
 It does not establish a performance gain. Each condition had only one episode
 without a policy error; refusal episodes are not ordinary behavioral failures.
 No held-out state was used.
+
+A fresh matched three-state confirmation for LIBERO Goal task 6 is running under
+`runs/cheese-confirmation`, with independently launched baseline and candidate parts
+for development states 0,1,2. Do not claim task success or a learned gain until all
+six episodes complete, each part passes batch validation, and the assembled conditions
+pass the official comparison with identical frozen provenance.
 
 The proposed guide contains no stored scene coordinates or fixed trajectory.
 Its budget ratios, direct-approach advice and visual grasp checks remain unproven

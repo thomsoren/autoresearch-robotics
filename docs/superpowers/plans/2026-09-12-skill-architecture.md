@@ -17,8 +17,9 @@ revises frozen Markdown memory; the coordinator retains measured development gai
 
 ## Task 1: Feedback control and measured evidence
 
-Files: simulation/sim.py, execute/inspect_agent.py, new execute/control.py if needed,
-simulation/tests/test_pose_control.py, execute/test_inspect_agent.py.
+Files: simulation/sim.py, execute/inspect_agent.py, execute/control.py,
+execute/perception.py, execute/operational_policy.py, execute/reactive_controller.py
+and focused control, camera, policy and controller tests.
 
 - [x] Reproduce a 1 cm request failing a 2 mm position-error assertion in real simulation.
 - [x] Inspect OSC orientation semantics and stock policy-supported action contracts.
@@ -26,6 +27,12 @@ simulation/tests/test_pose_control.py, execute/test_inspect_agent.py.
   finite/bounds validation and strict physics budgets.
 - [x] Record request/achieved pose, residual and physics-step interval in control.jsonl.
 - [x] Test translation, rotation, blocked targets, gripper persistence and exhaustion.
+- [x] Capture synchronized upright RGB/depth, intrinsics and observation-local camera
+  transforms; expose bounded visible-pixel world-surface queries without object state.
+- [x] Clarify stock move schemas and operational note fields without replacing stock
+  action validation or execution.
+- [x] Replan after measured stalls or motion limits through the public Controller API,
+  while preserving the remainder of successful action chunks.
 
 ## Task 2: Grounded reusable skill author
 
@@ -75,7 +82,7 @@ Files: docs/SETUP.md, execute/README.md, README.md, docs/IMPLEMENTATION.md.
   Observed content errors are now regression cases for stronger proposal checks.
 - User delegated demo externally and set hackathon deadline under three hours;
   viewer integration stays in demo/ and docs/DEMO.md owned by that agent.
-- Final full suite: 130 passed; Ruff clean. Acting model is now Fable 5.1 as requested.
+- Latest full suite: 151 passed; Ruff clean. Acting model is Fable 5.1 as requested.
 - Fable's response allowance increased to 8192 after a 1024-token probe truncated.
   HTTP contract tests verify the effective limit and preservation of image history.
 - First full Fable loop preserved two refusal errors and an author timeout; no
@@ -83,3 +90,12 @@ Files: docs/SETUP.md, execute/README.md, README.md, docs/IMPLEMENTATION.md.
 - Follow-up completed all six episodes and one author pass: 0/3 versus 0/3,
   two policy errors per condition, candidate rejected, no guide promoted.
   Sonnet author cost $0.13599505. No learned gain or held-out transfer established.
+- Calibrated RGB-D now supplies measured visible-surface positions through
+  `locate_pixels`. It reduces monocular geometry ambiguity but supplies no object labels,
+  centers, grasp targets or task-success signal. Camera calibration is synchronized to
+  each observation, including wrist motion.
+- The public reactive controller cancels queued waypoints after `stalled` or
+  `motion_limit` feedback and requests a fresh policy action; ordinary chunks continue.
+- A fresh matched three-state cream-cheese baseline/candidate confirmation is running.
+  It is not evidence of task success or learning until both complete and pass the frozen
+  provenance and comparison checks.
