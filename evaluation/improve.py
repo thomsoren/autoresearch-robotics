@@ -154,6 +154,75 @@ def gripper_facts(episode):
     }
 
 
+def impact_signals(facts):
+    """Measured facts and the task stage each one gates, earliest stage first.
+
+    Ordering is mechanical: the executor must approach before it can grasp, and
+    grasp before the episode's ending means anything. It expresses no view about
+    why a stage was not reached.
+    """
+    signals = []
+    calls = facts.get("motion", {}).get("calls") or []
+    ratios = [call["ratio"] for call in calls if call.get("ratio") is not None]
+    if ratios:
+        stalled = [
+            call["call_index"]
+            for call in calls
+            if call.get("ratio") is not None and call["ratio"] < 0.05
+        ]
+        measured = (
+            f"Achieved/commanded displacement spanned {min(ratios)}-{max(ratios)} "
+            f"over {len(ratios)} compared move_by calls."
+        )
+        if stalled:
+            measured += f" Calls {stalled} achieved under 5% of their command."
+        signals.append(
+            {
+                "signal": "achieved_motion_lagged_commands",
+                "gates_stage": "approach",
+                "measured": measured,
+                "blocks": (
+                    "A procedure that assumes a command is achieved in full will "
+                    "mis-plan the approach. These ratios establish the lag, not its origin."
+                ),
+            }
+        )
+    gripper = facts.get("gripper", {})
+    if gripper.get("close_ever_commanded") is False:
+        signals.append(
+            {
+                "signal": "gripper_never_closed",
+                "gates_stage": "grasp",
+                "measured": (
+                    f"Grip was {gripper.get('distinct_commands')} across "
+                    f"{gripper.get('rows')} logged steps; no close was ever commanded."
+                ),
+                "blocks": (
+                    "No grasp was attempted, so this episode carries no evidence "
+                    "about grasping or pulling, and advice about them is untestable here."
+                ),
+            }
+        )
+    inventory = facts.get("tool_calls", {})
+    counts = inventory.get("counts") or {}
+    if counts.get("give_up"):
+        signals.append(
+            {
+                "signal": "policy_gave_up",
+                "gates_stage": "termination",
+                "measured": (
+                    f"The trace contains {counts['give_up']} give_up call(s) among "
+                    f"{inventory.get('total')} calls."
+                ),
+                "blocks": (
+                    "The episode ended by the policy's own choice, not by a step, "
+                    "time or request limit."
+                ),
+            }
+        )
+    return signals
+
+
 def derive_facts(episode, trace, result):
     """Arithmetic over the raw artifacts. Never raises: the loop depends on it."""
     episode = Path(episode)
@@ -182,6 +251,7 @@ def derive_facts(episode, trace, result):
     if unavailable is not None:
         facts["motion"] = {"reason": unavailable}
         facts["tool_calls"] = {"reason": unavailable}
+    facts["impact_signals"] = impact_signals(facts)
     return facts
 
 
@@ -195,6 +265,7 @@ def headline_facts(facts):
         "near_zero_achieved_calls": sum(1 for ratio in ratios if ratio < 0.05),
         "tool_call_counts": facts.get("tool_calls", {}).get("counts"),
         "close_ever_commanded": facts.get("gripper", {}).get("close_ever_commanded"),
+        "impact_signals": [signal["signal"] for signal in facts.get("impact_signals", [])],
     }
 
 

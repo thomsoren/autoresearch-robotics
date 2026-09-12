@@ -54,6 +54,33 @@ visual interpretations and hypotheses. A closed gripper does not prove a grasp.
 Do not invent contact forces, drawer displacement or missing tool returns.
 Hidden reasoning is not required; give concise findings and their evidence.
 
+## Choose the most impactful learning first
+
+One candidate is tested per iteration, and the coordinator keeps it only if the
+development success count strictly improves. So the single most consequential
+choice you make is *which* learning to test. Do not propose the first plausible
+fix, and do not bundle several fixes into one skill to hedge.
+
+`derived-facts.json` supplies `impact_signals`: measured facts ordered by the
+task stage each one gates, approach before grasp before termination. Work down
+that list and rank the learnings it supports against four criteria, in order:
+
+1. **Does it gate the task at all?** A stage the episode never reached outranks
+   a refinement of one it did.
+2. **Is it the earliest blocker?** Advice about pulling a handle is worthless if
+   the arm never arrived. Prefer the earliest unmet stage.
+3. **Is the change observable in the next trace?** Prefer a learning whose effect
+   shows up in actions, measured positions or the tool inventory. "Issue an
+   explicit grip command" is checkable; "be more careful" is not.
+4. **Can the executor express it?** Only with the tools its policy actually has.
+   A learning requiring a tool, a rotation or a hold duration the contract cannot
+   express is not testable, whatever its merit.
+
+In `diagnosis`, name the learning you chose and say briefly why it wins on these
+criteria. Put the ranked alternatives you rejected, and the reason each lost, in
+`uncertainty`. A signal whose stage the episode never reached usually means the
+evidence for later stages is absent, not that the later stages are fine.
+
 ## One diagnosis and optional candidate
 
 Return the required structured report: decision, diagnosis, evidence,

@@ -371,3 +371,64 @@ def test_derived_facts_digest_matches_written_file(inspect_episode, tmp_path):
 def test_unavailable_motion_facts_are_listed_as_missing_evidence(inspect_episode, tmp_path):
     manifest = improve.prepare_evidence(inspect_episode, tmp_path / "improve", "agent")
     assert any("commanded" in value.lower() for value in manifest["missing_evidence"])
+
+
+def test_impact_signals_are_ordered_by_gated_stage(inspect_episode):
+    facts = facts_for(inspect_episode)
+    signals = facts["impact_signals"]
+    assert [s["signal"] for s in signals] == [
+        "achieved_motion_lagged_commands",
+        "gripper_never_closed",
+        "policy_gave_up",
+    ]
+    assert [s["gates_stage"] for s in signals] == ["approach", "grasp", "termination"]
+
+
+def test_gripper_signal_disappears_once_a_close_is_commanded(inspect_episode):
+    rows = [
+        {"step": 1, "action": [0, 0, 0, 0, 0, 0, -1.0]},
+        {"step": 2, "action": [0, 0, 0, 0, 0, 0, 1.0]},
+    ]
+    (inspect_episode / "actions.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    names = [s["signal"] for s in facts_for(inspect_episode)["impact_signals"]]
+    assert "gripper_never_closed" not in names
+    assert "achieved_motion_lagged_commands" in names
+
+
+def test_signals_cite_the_measurement_behind_them(inspect_episode):
+    signals = {s["signal"]: s for s in facts_for(inspect_episode)["impact_signals"]}
+    assert "0.2" in signals["achieved_motion_lagged_commands"]["measured"]
+    assert "3" in signals["gripper_never_closed"]["measured"]
+    assert signals["achieved_motion_lagged_commands"]["blocks"]
+
+
+def test_signals_never_claim_a_cause(inspect_episode):
+    text = json.dumps(facts_for(inspect_episode)["impact_signals"]).lower()
+    for forbidden in ("because", "blocked by", "collision", "obstruct"):
+        assert forbidden not in text
+
+
+def test_signals_degrade_with_no_trace(inspect_episode):
+    signals = facts_for(inspect_episode, trace=False)["impact_signals"]
+    names = [s["signal"] for s in signals]
+    assert names == ["gripper_never_closed"]
+
+
+def test_signals_are_empty_when_nothing_is_measurable(inspect_episode):
+    (inspect_episode / "actions.jsonl").write_text("not jsonl\n")
+    (inspect_episode / "executor-trace.json").write_text("not json{{{")
+    assert facts_for(inspect_episode)["impact_signals"] == []
+
+
+def test_headline_lists_signal_names_for_the_opening_prompt(inspect_episode, tmp_path):
+    manifest = improve.prepare_evidence(
+        inspect_episode,
+        tmp_path / "improve",
+        "agent",
+        trace=inspect_episode / "executor-trace.json",
+    )
+    assert manifest["derived_facts"]["impact_signals"] == [
+        "achieved_motion_lagged_commands",
+        "gripper_never_closed",
+        "policy_gave_up",
+    ]
