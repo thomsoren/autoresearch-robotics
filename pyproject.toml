@@ -1,0 +1,48 @@
+[project]
+name = "autoresearch-robotics"
+version = "0.1.0"
+description = "Agent skill improvement on LIBERO in MuJoCo"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "libero",
+    "robosuite==1.4.1",
+    "mujoco==3.2.7",
+    "numpy==1.26.4",
+    "numba==0.61.2",
+    "bddl==1.0.1",
+    "gym==0.25.2",
+    "torch==2.5.1",
+    "easydict>=1.9,<2",
+    "cloudpickle>=2.1,<4",
+    "pyyaml>=6,<7",
+    "opencv-python==4.10.0.84",
+    "imageio[ffmpeg]>=2.34,<3",
+    "matplotlib>=3.8,<4",
+    "future>=1,<2",
+]
+
+[dependency-groups]
+dev = ["pytest>=8,<9", "ruff>=0.9,<1"]
+
+[tool.uv]
+package = false
+environments = ["sys_platform == 'darwin'", "sys_platform == 'linux'"]
+
+[tool.uv.sources]
+libero = { path = ".vendor/libero", editable = true }
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+extend-exclude = [".vendor"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

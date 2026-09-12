@@ -1,0 +1,10 @@
+*
+!simulation/
+!simulation/Dockerfile
+!simulation/__init__.py
+!simulation/prepare.py
+!simulation/sim.py
+!simulation/evaluate.py
+!pyproject.toml
+!uv.lock
+!.python-version
