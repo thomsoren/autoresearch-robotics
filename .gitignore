@@ -10,3 +10,7 @@ __pycache__/
 .env
 .env.*
 !.env.example
+
+# Prepared WSL worktrees may reuse these directories through symlinks.
+/.venv
+/.vendor

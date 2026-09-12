@@ -1,3 +1,8 @@
+> Historical diagnosis at commit `3b14746`. The integrated branch implements
+> feedback pose control and corrects the measured orientation frame. See
+> [README.md](README.md) for the current contract. Original measurements below
+> remain diagnostic evidence, not an exhaustive proof of task impossibility.
+
 # Control diagnosis: LIBERO Goal task 0, state 0
 
 Scripted, no-LLM measurements of why the Inspect executor stalls before the

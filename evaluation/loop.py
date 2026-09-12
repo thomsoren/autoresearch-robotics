@@ -44,9 +44,11 @@ def identity():
         ROOT / name
         for name in (
             "execute/inspect_agent.py",
+            "execute/control.py",
             "simulation/sim.py",
             "evaluation/evaluate.py",
             "evaluation/loop.py",
+            "evaluation/transfer.py",
             "evaluation/improve.py",
             "evaluation/program.md",
             "uv.lock",
@@ -63,14 +65,15 @@ def profile(args):
     from inspect_robots import Scene
     from inspect_robots_agent import LLMAgentPolicy
 
-    from execute.inspect_agent import LiberoEmbodiment, image_horizon
+    from execute.control import pose_precheck
+    from execute.inspect_agent import LiberoEmbodiment, image_horizon, output_token_limit
 
     policy = LLMAgentPolicy(
         model=args.model,
         wire="messages",
         speed=None,
         effort=args.effort,
-        max_output_tokens=1024,
+        max_output_tokens=output_token_limit(args.model),
         max_llm_calls=args.max_calls,
         images="always",
         depth="off",
@@ -79,8 +82,9 @@ def profile(args):
         base_url="https://api.anthropic.com/v1",
         api_key_env="CLAUDE_API_KEY",
         env={"CLAUDE_API_KEY": "offline-prompt-inspection"},
+        pre_check=pose_precheck if args.control == "pose" else None,
     )
-    policy.bind(LiberoEmbodiment(Path("unused")).info)
+    policy.bind(LiberoEmbodiment(Path("unused"), control=args.control).info)
     policy.reset(Scene(id="profile", instruction="profile"))
     base = policy.transcript()[0]["content"]
     code = identity()
@@ -95,6 +99,7 @@ def profile(args):
             "suite",
             "task_id",
             "seed",
+            "control",
         )
     }
     protocol = {
@@ -111,19 +116,30 @@ def profile(args):
         "fresh_session_per_episode": True,
     }
     validate_protocol(protocol)
-    return {"protocol": protocol, "identity": code, "base_prompt": base}
+    return {
+        "protocol": protocol,
+        "identity": code,
+        "base_prompt": base,
+        "executor_config": config,
+    }
 
 
 def child(command, log, timeout):
     """Isolated process group: also stop SDK/Claude descendants on timeout."""
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("w") as stream:
+        environment = os.environ.copy()
+        inherited_pythonpath = environment.get("PYTHONPATH")
+        environment["PYTHONPATH"] = str(ROOT) + (
+            os.pathsep + inherited_pythonpath if inherited_pythonpath else ""
+        )
         process = subprocess.Popen(
             command,
             cwd=ROOT,
             stdout=stream,
             stderr=subprocess.STDOUT,
             start_new_session=True,
+            env=environment,
         )
         try:
             return process.wait(timeout=timeout)
@@ -149,7 +165,9 @@ def unchanged(frozen):
         raise ValueError("Code or dependencies changed during the loop")
 
 
-def batch(args, output, skill, frozen, deadline):
+def batch(args, output, skill, frozen, deadline, states=STATES, split="development"):
+    if split not in ("development", "held_out"):
+        raise ValueError("Batch split must be development or held_out")
     unchanged(frozen)
     output.mkdir(parents=True, exist_ok=False)
     snapshot = None
@@ -162,13 +180,15 @@ def batch(args, output, skill, frozen, deadline):
         "policy": "noop" if args.smoke else "inspect-robots-agent",
         "suite": args.suite,
         "task_id": args.task_id,
-        "state_ids": list(STATES),
+        "state_ids": list(states),
         "seed": args.seed,
         "episode_seeds": {},
         "initial_frame_sha256": {},
         "max_steps": args.max_steps,
         "skill_hash": fingerprint,
         "observation_mode": "rgb_proprio",
+        "control": args.control,
+        "evaluation_split": split,
         "executor_protocol": frozen["protocol"],
         "simulator_sha256": frozen["identity"][str(ROOT / "simulation/sim.py")],
         "evaluator_sha256": frozen["identity"][str(ROOT / "evaluation/evaluate.py")],
@@ -176,7 +196,7 @@ def batch(args, output, skill, frozen, deadline):
     }
     save(output / "manifest.json", manifest)
     rows = []
-    for state in STATES:
+    for state in states:
         unchanged(frozen)
         timeout = allowance(deadline, args.episode_timeout + 30)
         raw = output / "raw" / f"state-{state:03d}"
@@ -206,6 +226,8 @@ def batch(args, output, skill, frozen, deadline):
             args.effort,
             "--speed",
             "standard",
+            "--control",
+            args.control,
         ]
         if snapshot:
             command.extend(["--skill", str(snapshot)])
@@ -218,6 +240,10 @@ def batch(args, output, skill, frozen, deadline):
                 f"Executor did not export state {state}; see {output}/state-{state:03d}.log"
             )
         row, config = read(episode / "result.json"), read(raw / "experiment.json")
+        if row.get("evaluation_split") not in (None, split):
+            raise ValueError("Executor export has a mismatched evaluation split")
+        row["evaluation_split"] = split
+        save(episode / "result.json", row)
         expected = {
             "model": args.model,
             "speed": "standard",
@@ -229,14 +255,24 @@ def batch(args, output, skill, frozen, deadline):
             "task_id": args.task_id,
             "seed": args.seed,
             "state_id": state,
-            "rotation": "fixed",
+            "control": args.control,
+            "rotation": "rot6d" if args.control == "pose" else "fixed",
             "smoke": args.smoke,
             "skill_hash": fingerprint,
             "adapter_sha256": frozen["identity"][str(ROOT / "execute/inspect_agent.py")],
         }
         if any(config.get(k) != v for k, v in expected.items()):
             raise ValueError("Executor export disagrees with the frozen configuration")
-        for key in ("suite", "task_id", "max_steps", "observation_mode", "policy", "skill_hash"):
+        for key in (
+            "suite",
+            "task_id",
+            "max_steps",
+            "observation_mode",
+            "policy",
+            "skill_hash",
+            "control",
+            "evaluation_split",
+        ):
             if row.get(key) != manifest[key]:
                 raise ValueError(f"Episode has mismatched {key}")
         if row.get("init_state_id") != state or type(row.get("seed")) is not int:
@@ -296,7 +332,14 @@ def batch(args, output, skill, frozen, deadline):
     return output
 
 
-def propose(args, source, output, history, frozen, deadline, iteration):
+def successful_episode(batch_path):
+    """Return one measured successful development episode, if the incumbent has one."""
+    _, _, rows = load_batch(batch_path)
+    row = next((item for item in rows if item["success"] and not item.get("error")), None)
+    return None if row is None else batch_path / f"state-{row['init_state_id']:03d}"
+
+
+def propose(args, source, incumbent, output, history, frozen, deadline, iteration):
     unchanged(frozen)
     _, _, rows = load_batch(source)
     failures = [r for r in rows if not r["success"] and not r.get("error")]
@@ -305,7 +348,16 @@ def propose(args, source, output, history, frozen, deadline, iteration):
     row = failures[(iteration - 1) % len(failures)]
     episode = source / f"state-{row['init_state_id']:03d}"
     context = output.parent / "context.json"
-    save(context, {"tested_batch": str(source), "selection_history": history})
+    regression = successful_episode(incumbent)
+    save(
+        context,
+        {
+            "tested_batch": str(source),
+            "selected_incumbent_batch": str(incumbent),
+            "regression_episode": str(regression) if regression else None,
+            "selection_history": history,
+        },
+    )
     timeout = allowance(deadline, args.improve_timeout + 30)
     command = [
         sys.executable,
@@ -331,6 +383,10 @@ def propose(args, source, output, history, frozen, deadline, iteration):
     ]
     if (source / "skills").exists():
         command.extend(["--skills", str(source / "skills")])
+    if (incumbent / "skills").exists():
+        command.extend(["--incumbent", str(incumbent / "skills")])
+    if regression is not None:
+        command.extend(["--regression", str(regression)])
     if child(command, output.parent / "improvement.log", timeout) != 0:
         raise RuntimeError(f"Improvement agent failed; see {output.parent}/improvement.log")
     unchanged(frozen)
@@ -389,7 +445,14 @@ def run(args):
             folder = output / f"iteration-{iteration:03d}"
             history = {"selected_batch": state["selected_batch"], "iterations": state["iterations"]}
             skill = propose(
-                args, source, folder / "improvement", history, frozen, deadline, iteration
+                args,
+                source,
+                selected,
+                folder / "improvement",
+                history,
+                frozen,
+                deadline,
+                iteration,
             )
             if skill is None:
                 state["status"] = "deferred"
@@ -438,11 +501,12 @@ def arguments(argv=None):
     parser.add_argument("--suite", default="libero_goal")
     parser.add_argument("--task-id", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--model", default="claude-opus-5")
+    parser.add_argument("--control", choices=["pose", "xyz"], default="pose")
+    parser.add_argument("--model", default="claude-fable-5-1")
     parser.add_argument("--effort", choices=["low", "medium", "high"], default="low")
     parser.add_argument("--max-calls", type=int, default=12)
-    parser.add_argument("--max-steps", type=int, default=300)
-    parser.add_argument("--episode-timeout", type=float, default=180)
+    parser.add_argument("--max-steps", type=int, default=900)
+    parser.add_argument("--episode-timeout", type=float, default=300)
     parser.add_argument("--improve-model", default="claude-opus-5")
     parser.add_argument("--improve-budget-usd", type=float, default=1)
     parser.add_argument("--improve-turns", type=int, default=18)

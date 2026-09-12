@@ -34,8 +34,10 @@ from inspect_robots import (
     success_at_end,
 )
 from inspect_robots_agent import LLMAgentPolicy
+from scipy.spatial.transform import Rotation
 
 from evaluation.evaluate import skill_hash
+from execute.control import pose_precheck, rotation_from_6d, servo_pose
 from simulation.sim import SUITES, Robot, positive_int, vector
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,24 +50,54 @@ def image_horizon(model):
     return None if model == "claude-fable-5-1" else 2
 
 
-DOCS = """LIBERO Panda robot, XYZ translation and gripper only. Orientation is fixed.
-move_by displacements dx, dy, dz are in WORLD METERS, not normalized controls.
-Each emitted step commands at most 0.01 m per axis; actual motion can lag or be
-blocked. Re-observe progress. Rotation is unavailable in this experiment.
-grip is a command direction: positive CLOSES, negative OPENS, zero/omitted
-retains the last command. It is not a distance. Closing for one step may not
-finish the grasp; subsequent steps retain the command. Zero translation can
-advance physics while the fingers move. Finger qpos is measured in meters;
-a closed gripper does not establish contact or attachment. Images are upright
-agentview and robot0_eye_in_hand cameras. Only LIBERO decides task success;
-calling done cannot declare benchmark success. Reward is sparse success reward.
+def output_token_limit(model):
+    # Fable's response budget also covers thinking before its robot tool call.
+    return 8192 if model == "claude-fable-5-1" else 1024
+
+
+DOCS = """LIBERO Panda robot. Images are upright external and wrist RGB views.
+For note and hindsight, provide only a brief operational summary: visible scene
+evidence, the intended action, or the observed outcome and practical lesson.
+Position and orientation are measured at the same grip site in WORLD coordinates.
+The feedback controller attempts each waypoint with bounded OSC commands; it does
+not plan around obstacles or guarantee arrival. Each Inspect waypoint can consume
+up to 30 PHYSICS steps. Native Inspect step counts are waypoints, not physics time.
+Read physics_steps, remaining_steps, motion_position_error, motion_rotation_error
+and motion_reached after a call. Re-observe and adapt when movement falls short.
+Finger qpos is measured in meters. Closed fingers do not establish a grasp.
+Only LIBERO decides success; done cannot declare it. Reward is sparse success.
 """
+POSE_DOCS = """
+move_to accepts absolute targets x,y,z in meters plus orientation axes and grip.
+Orientation is rot6d: xx,xy,xz are the tool's local X unit axis in world coordinates;
+yx,yy,yz are its local Y unit axis. Local Z = X cross Y points toward the fingertips.
+Supply both perpendicular unit axes together when changing orientation. Omitted
+components hold the observed value. The controller orthonormalizes axes; parallel
+or zero axes are rejected. For large rotations use intermediate orientations.
+These six components are unitless direction vectors, NOT Euler angles or radians.
+grip=0 commands OPEN; grip=1 commands CLOSE. Omission retains the last command.
+The last eef_pose component is the commanded grip, not measured finger width.
+A grip-only move_to keeps the measured pose and advances fingers for bounded time.
+"""
+XYZ_DOCS = """
+move_by accepts total WORLD displacement dx,dy,dz in meters. Wrist stays fixed.
+Positive grip CLOSES, negative OPENS, zero/omitted retains the command. A zero
+translation still advances physics while fingers move. Orientation is unavailable.
+"""
+POSE_LOW = np.array([-1.0, -1.0, 0.3, *([-1.0] * 6), 0.0])
+POSE_HIGH = np.array([1.0, 1.0, 1.8, *([1.0] * 6), 1.0])
 
 
 class LiberoEmbodiment:
     """Translate Inspect's physical XYZ increments to the existing OSC robot API."""
 
-    def __init__(self, output, suite="libero_goal", task_id=0, state_id=0, max_steps=300):
+    def __init__(
+        self, output, suite="libero_goal", task_id=0, state_id=0, max_steps=300, control="pose"
+    ):
+        if control not in ("pose", "xyz"):
+            raise ValueError("control must be pose or xyz")
+        self.control = control
+        self.last_motion = None
         self.output = Path(output)
         self.suite, self.task_id, self.state_id, self.max_steps = (
             suite,
@@ -75,20 +107,23 @@ class LiberoEmbodiment:
         )
         self.robot = None
         self.info = EmbodimentInfo(
-            name="libero_xyz_gripper",
+            name=f"libero_{control}_gripper",
             is_simulated=True,
             control_hz=20,
             capabilities=frozenset({"seedable", "resettable", "privileged_success", "renderable"}),
             action_space=Box(
-                shape=(4,),
-                low=-LIMITS,
-                high=LIMITS,
+                shape=(10,) if control == "pose" else (4,),
+                low=POSE_LOW if control == "pose" else -LIMITS,
+                high=POSE_HIGH if control == "pose" else LIMITS,
                 semantics=ActionSemantics(
-                    control_mode="eef_delta_pos",
-                    rotation_repr="none",
+                    control_mode="eef_abs_pose" if control == "pose" else "eef_delta_pos",
+                    rotation_repr="rot6d" if control == "pose" else "none",
                     gripper="binary",
                     frame="world",
-                    dim_labels=("dx", "dy", "dz", "grip"),
+                    dim_labels=("x", "y", "z", "xx", "xy", "xz", "yx", "yy", "yz", "grip")
+                    if control == "pose"
+                    else ("dx", "dy", "dz", "grip"),
+                    max_step=(0.01, 0.01, 0.01, *([0.05] * 6), 1.0) if control == "pose" else None,
                 ),
             ),
             observation_space=ObservationSpace(
@@ -100,10 +135,16 @@ class LiberoEmbodiment:
                         StateField("eef_pos", (3,), "m"),
                         StateField("eef_quat", (4,), "unit_quat"),
                         StateField("finger_qpos", (2,), "m"),
+                        StateField("eef_pose", (10,), "mixed"),
+                        StateField("physics_steps", (1,), "steps"),
+                        StateField("remaining_steps", (1,), "steps"),
+                        StateField("motion_position_error", (1,), "m"),
+                        StateField("motion_rotation_error", (1,), "rad"),
+                        StateField("motion_reached", (1,), "bool"),
                     )
                 ),
             ),
-            docs=DOCS,
+            docs=DOCS + (POSE_DOCS if control == "pose" else XYZ_DOCS),
         )
 
     def reset(self, scene, *, seed=None):
@@ -120,29 +161,72 @@ class LiberoEmbodiment:
         return self.observation(self.robot.observe())
 
     def observation(self, raw):
+        rotation = Rotation.from_quat(raw["eef_quat_xyzw"]).as_matrix()
+        motion = self.last_motion or {}
         return Observation(
             images={name: imageio.imread(path) for name, path in raw["images"].items()},
             state={
                 "eef_pos": np.array(raw["eef_pos"]),
                 "eef_quat": np.array(raw["eef_quat_xyzw"]),
                 "finger_qpos": np.array(raw["gripper_qpos"]),
+                "eef_pose": np.r_[
+                    raw["eef_pos"],
+                    rotation[:, 0],
+                    rotation[:, 1],
+                    float(self.robot.gripper_command > 0),
+                ],
+                "physics_steps": np.array([raw["steps"]]),
+                "remaining_steps": np.array([raw["remaining_steps"]]),
+                "motion_position_error": np.array([motion.get("position_error", 0.0)]),
+                "motion_rotation_error": np.array([motion.get("rotation_error", 0.0)]),
+                "motion_reached": np.array([float(motion.get("reached", True))]),
             },
             instruction=raw["instruction"],
         )
 
     def step(self, action):
-        values = vector(action.data, 4, "Inspect action")
-        if np.any(np.abs(values) > LIMITS + 1e-9):
-            raise ValueError("Inspect action exceeds declared per-step bounds")
-        grip = self.robot.gripper_command if values[3] == 0 else float(np.sign(values[3]))
-        raw = self.robot.step([*(values[:3] / 0.05), 0.0, 0.0, 0.0, grip])
+        values = vector(action.data, 10 if self.control == "pose" else 4, "Inspect action")
+        space = self.info.action_space
+        if np.any(values < space.low - 1e-9) or np.any(values > space.high + 1e-9):
+            raise ValueError("Inspect action exceeds declared bounds")
+        if action.meta.get("request_stop"):
+            raw = self.robot.observe()
+            return StepResult(
+                observation=self.observation(raw),
+                reward=float(raw["success"]),
+                terminated=raw["success"],
+                truncated=raw["done"] and not raw["success"],
+                info={"success": raw["success"]},
+            )
+        position, rotation = self.robot.pose()
+        if self.control == "pose":
+            target, rotation = values[:3], rotation_from_6d(values[3:9])
+            grip = 1.0 if values[9] >= 0.5 else -1.0
+        else:
+            target = position + values[:3]
+            grip = self.robot.gripper_command if values[3] == 0 else float(np.sign(values[3]))
+        grip_changed = grip != self.robot.gripper_command
+        raw = servo_pose(
+            self.robot,
+            target,
+            rotation,
+            grip=grip,
+            min_steps=15 if grip_changed else 1,
+            chunk_final=bool(action.meta.get("chunk_final", False)),
+        )
+        self.last_motion = raw
         return StepResult(
             observation=self.observation(raw),
             reward=float(raw["success"]),
             terminated=raw["success"],
             termination_reason="success" if raw["success"] else None,
             truncated=raw["done"] and not raw["success"],
-            info={"success": raw["success"]},
+            info={
+                "success": raw["success"],
+                "start_step": raw["start_step"],
+                "end_step": raw["end_step"],
+                "stop_reason": raw["stop_reason"],
+            },
         )
 
     def close(self):
@@ -215,7 +299,8 @@ def run(args):
         "suite": args.suite,
         "task_id": args.task_id,
         "seed": args.seed,
-        "rotation": "fixed",
+        "rotation": "rot6d" if args.control == "pose" else "fixed",
+        "control": args.control,
         "skill_hash": skill_hash(output / "skills" if skill else None),
         "packages": {
             name: version(name) for name in ("inspect-robots", "inspect-robots-agent", "mujoco")
@@ -224,7 +309,9 @@ def run(args):
         "smoke": args.smoke,
     }
     (output / "experiment.json").write_text(json.dumps(config, indent=2) + "\n")
-    embodiment = LiberoEmbodiment(output, args.suite, args.task_id, args.state, args.max_steps)
+    embodiment = LiberoEmbodiment(
+        output, args.suite, args.task_id, args.state, args.max_steps, control=args.control
+    )
     transport = RequestBudget(output, args.max_calls, time.monotonic() + args.timeout)
     policy = None
     error = None
@@ -247,7 +334,16 @@ def run(args):
             from inspect_robots import Action
 
             for _ in range(min(args.max_steps, 10)):
-                embodiment.step(Action(np.array([0.0, 0.0, 0.002, -1.0])))
+                if embodiment.robot.done:
+                    break
+                if args.control == "pose":
+                    action = (
+                        embodiment.observation(embodiment.robot.observe()).state["eef_pose"].copy()
+                    )
+                    action[2] += 0.002
+                else:
+                    action = np.array([0.0, 0.0, 0.002, -1.0])
+                embodiment.step(Action(action))
             displacement = np.linalg.norm(
                 embodiment.robot.observe()["eef_pos"] - before.state["eef_pos"]
             )
@@ -263,7 +359,7 @@ def run(args):
                 wire="messages",
                 speed="fast" if args.speed == "fast" else None,
                 effort=args.effort,
-                max_output_tokens=1024,
+                max_output_tokens=output_token_limit(args.model),
                 max_llm_calls=args.max_calls,
                 images="always",
                 depth="off",
@@ -273,6 +369,7 @@ def run(args):
                 api_key_env="CLAUDE_API_KEY",
                 env={"CLAUDE_API_KEY": key},
                 transport=transport,
+                pre_check=pose_precheck if args.control == "pose" else None,
                 wire_capture=False,
             )
             task = Task(
@@ -313,7 +410,8 @@ def run(args):
                 "requested_model": args.model,
                 "requested_speed": args.speed,
                 "api_requests_attempted": transport.count,
-                "rotation": "fixed",
+                "rotation": "rot6d" if args.control == "pose" else "fixed",
+                "control": args.control,
             }
             if error:
                 result.update(success=False, termination="policy_error")
@@ -348,13 +446,14 @@ def main():
     parser.add_argument("--suite", choices=SUITES, default="libero_goal")
     parser.add_argument("--task-id", type=int, default=0)
     parser.add_argument("--state", type=int, default=0)
+    parser.add_argument("--control", choices=["pose", "xyz"], default="pose")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--model", default="claude-opus-5")
-    parser.add_argument("--speed", choices=["fast", "standard"], default="fast")
+    parser.add_argument("--model", default="claude-fable-5-1")
+    parser.add_argument("--speed", choices=["fast", "standard"], default="standard")
     parser.add_argument("--effort", choices=["low", "medium", "high"], default="low")
     parser.add_argument("--max-calls", type=int, default=12)
-    parser.add_argument("--max-steps", type=int, default=300)
-    parser.add_argument("--timeout", type=float, default=180)
+    parser.add_argument("--max-steps", type=int, default=900)
+    parser.add_argument("--timeout", type=float, default=300)
     parser.add_argument(
         "--skill", type=Path, help="Optional Markdown notes, frozen before the episode"
     )

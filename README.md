@@ -2,6 +2,16 @@
 
 Agent skill improvement on LIBERO in MuJoCo. Python 3.11, managed with `uv`.
 
+## Current integrated architecture
+
+The `ludvig/skill-architecture` branch adds measured pose control, reusable
+operating-guide revisions, regression evidence and a separate frozen evaluation
+command. The user authorized integration across the earlier team boundaries.
+Start with [current implementation and commands](docs/IMPLEMENTATION.md),
+[architecture](docs/ARCHITECTURE.md), and [executor contract](execute/README.md).
+Gripper-tip testing is paused. Historical handoff sections below describe the
+original team split; they do not restrict work authorized for this branch.
+
 ## Ownership and layout
 
 ```text

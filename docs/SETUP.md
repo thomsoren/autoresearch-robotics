@@ -1,3 +1,7 @@
+> For the integrated pose-control and operating-guide branch, use
+> [IMPLEMENTATION.md](IMPLEMENTATION.md) and [execute/README.md](../execute/README.md).
+> Earlier experiment descriptions below are retained as setup history.
+
 # Autoresearch for robotics
 
 Improve an agent's reusable robot skills through repeated LIBERO evaluations in

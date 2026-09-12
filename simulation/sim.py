@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 from simulation.prepare import LIBERO_REV, configure
 
@@ -135,6 +136,14 @@ class Robot:
         if self._writer is not None:
             self._writer.append_data(self._image("agentview"))
 
+    def pose(self):
+        """Measured world pose at the grip site used by OSC, with no physics advance."""
+        arm = self._env.env.robots[0]
+        return (
+            arm.sim.data.site_xpos[arm.eef_site_id].copy(),
+            arm.sim.data.site_xmat[arm.eef_site_id].reshape(3, 3).copy(),
+        )
+
     def observe(self):
         import imageio.v2 as imageio
 
@@ -146,8 +155,8 @@ class Robot:
         result = dict(
             instruction=self.metadata["instruction"],
             images=images,
-            eef_pos=self._obs["robot0_eef_pos"].tolist(),
-            eef_quat_xyzw=self._obs["robot0_eef_quat"].tolist(),
+            eef_pos=self.pose()[0].tolist(),
+            eef_quat_xyzw=Rotation.from_matrix(self.pose()[1]).as_quat().tolist(),
             gripper_qpos=self._obs["robot0_gripper_qpos"].tolist(),
             steps=self.steps,
             remaining_steps=self.max_steps - self.steps,
@@ -172,6 +181,9 @@ class Robot:
                     dict(
                         step=self.steps,
                         action=list(map(float, action)),
+                        eef_pos=self.pose()[0].tolist(),
+                        eef_quat_xyzw=Rotation.from_matrix(self.pose()[1]).as_quat().tolist(),
+                        gripper_qpos=self._obs["robot0_gripper_qpos"].tolist(),
                         reward=float(reward),
                         success=self.success,
                     )

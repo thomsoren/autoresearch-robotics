@@ -46,6 +46,17 @@ def rig(tmp_path, monkeypatch):
             "identity": code.copy(),
             "protocol": protocol,
             "base_prompt": "base prompt",
+            "executor_config": {
+                "model": "claude-opus-5",
+                "effort": "low",
+                "max_calls": 12,
+                "max_steps": 300,
+                "episode_timeout": 180,
+                "suite": "libero_goal",
+                "task_id": 0,
+                "seed": 0,
+                "control": "pose",
+            },
         },
     )
     state = {"calls": [], "wins": [{0}, {0}, {0, 1}], "proposals": 0, "contexts": []}
@@ -83,6 +94,7 @@ def rig(tmp_path, monkeypatch):
                 "seed": 100 + index + (batch_number if state.get("seed_mismatch") else 0),
                 "max_steps": 300,
                 "observation_mode": "rgb_proprio",
+                "control": "pose",
                 "policy": "inspect-robots-agent",
                 "skill_hash": fingerprint,
                 "success": index in state["wins"][batch_number] and error is None,
@@ -108,7 +120,8 @@ def rig(tmp_path, monkeypatch):
                     "task_id": 0,
                     "seed": 0,
                     "state_id": index,
-                    "rotation": "fixed",
+                    "control": "pose",
+                    "rotation": "rot6d",
                     "smoke": False,
                     "skill_hash": fingerprint,
                     "adapter_sha256": "a" * 64,
@@ -130,29 +143,57 @@ def rig(tmp_path, monkeypatch):
             trace=Path(option(command, "--trace")),
             skills=Path(option(command, "--skills")) if "--skills" in command else None,
             context=context,
+            incumbent=(Path(option(command, "--incumbent")) if "--incumbent" in command else None),
+            regression=(
+                Path(option(command, "--regression")) if "--regression" in command else None
+            ),
         )
         deferred = state.get("defer", False)
-        text = f"---\nname: drawer\ndescription: test skill\n---\nRevision {state['proposals']}.\n"
+        text = (
+            "---\nname: robot_operating_guide\ndescription: test skill\n---\n"
+            f"Revision {state['proposals']}.\n"
+        )
         report = {
             "decision": "defer" if deferred else "propose",
             "diagnosis": "fixture",
             "evidence": ["result.json:1"],
             "uncertainty": [],
             "prediction": "inspect progress",
-            "candidate_name": "" if deferred else "drawer",
+            "candidate_name": "" if deferred else "robot_operating_guide",
             "candidate_markdown": "" if deferred else text,
             "validation_status": "unvalidated",
         }
         loop.save(output / "improvement.json", report)
         if not deferred:
-            path = output / "skills/drawer/SKILL.md"
+            path = output / "skills/robot_operating_guide/SKILL.md"
             path.parent.mkdir(parents=True)
             path.write_text("tampered" if state.get("tamper_skill") else text)
         return 0
 
     monkeypatch.setattr(loop, "child", child)
-    state["args"] = loop.arguments(["--output", str(tmp_path / "loop"), "--iterations", "2"])
+    state["args"] = loop.arguments(
+        [
+            "--output",
+            str(tmp_path / "loop"),
+            "--iterations",
+            "2",
+            "--model",
+            "claude-opus-5",
+            "--max-steps",
+            "300",
+            "--episode-timeout",
+            "180",
+        ]
+    )
     return state
+
+
+def test_pose_feedback_loop_defaults_allow_bounded_waypoints(tmp_path):
+    args = loop.arguments(["--output", str(tmp_path / "loop")])
+    assert args.model == "claude-fable-5-1"
+    assert args.control == "pose"
+    assert args.max_steps == 900
+    assert args.episode_timeout == 300
 
 
 def test_rejected_candidate_informs_next_revision_but_only_strict_gain_is_selected(rig):
@@ -167,11 +208,32 @@ def test_rejected_candidate_informs_next_revision_but_only_strict_gain_is_select
     assert result["active_skills_updated"] is False
     batches = [c for c in rig["calls"] if c[2] == "execute.inspect_agent"]
     assert [int(option(c, "--state")) for c in batches] == [0, 1, 2] * 3
+    assert all(option(c, "--control") == "pose" for c in batches)
     assert len({option(c, "--output") for c in batches}) == 9  # Fresh child per episode.
     manifest, summary, rows = loop.load_batch(Path(result["selected_batch"]))
     assert manifest["seed"] == 0 and manifest["episode_seeds"] == {"0": 100, "1": 101, "2": 102}
     assert summary["successes"] == 2
     assert rows[0]["seed"] == 100  # Original derived seed is not rewritten.
+    assert manifest["control"] == "pose"
+    assert manifest["evaluation_split"] == rows[0]["evaluation_split"] == "development"
+
+
+def test_rejected_candidate_is_separate_from_selected_incumbent_and_regression(rig, tmp_path):
+    initial = tmp_path / "initial.md"
+    initial.write_text("---\nname: initial\ndescription: initial skill\n---\nObserve.\n")
+    rig["args"].skill = initial
+    rig["wins"] = [{0}, {0}, {0, 1}]
+
+    loop.run(rig["args"])
+
+    improvements = [c for c in rig["calls"] if c[2] == "evaluation.improve"]
+    assert option(improvements[1], "--skills").endswith("iteration-001/candidate/skills")
+    assert option(improvements[1], "--incumbent").endswith("baseline/skills")
+    assert option(improvements[1], "--regression").endswith("baseline/state-000")
+    evidence = loop.read(rig["args"].output / "iteration-002/improvement/evidence.json")
+    assert "skills/task/SKILL.md" in evidence["files_sha256"]
+    assert "incumbent/task/SKILL.md" in evidence["files_sha256"]
+    assert evidence["regression"]["success"] is True
 
 
 def test_tie_retains_baseline_and_stops_at_iteration_limit(rig):
@@ -242,6 +304,26 @@ def test_changed_starting_images_cannot_claim_skill_improvement(rig):
     assert result["status"] == "inconclusive"
     assert result["selected_batch"].endswith("baseline")
     assert "Different initial camera frames" in result["iterations"][0]["reasons"]
+
+
+def test_different_control_contract_cannot_claim_skill_improvement(rig):
+    rig["args"].iterations = 1
+    loop.run(rig["args"])
+    candidate = rig["args"].output / "iteration-001/candidate"
+    for name in ("manifest.json", "summary.json"):
+        path = candidate / name
+        data = loop.read(path)
+        data["control"] = "xyz"
+        loop.save(path, data)
+
+    result = loop.compare_runs(
+        rig["args"].output / "baseline",
+        candidate,
+        output=rig["args"].output / "control-comparison.json",
+    )
+
+    assert result["decision"] == "inconclusive"
+    assert "Different control" in result["reasons"]
 
 
 def test_defer_stops_without_candidate_rollouts(rig):

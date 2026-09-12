@@ -15,7 +15,7 @@ from inspect_robots import Action, Observation  # noqa: E402
 from execute.inspect_agent import LIMITS, LiberoEmbodiment  # noqa: E402
 
 # Measured in MuJoCo 3.2.7 on libero_goal task 0, state 0. See the diagnosis in
-# execute/README.md; regenerate with the scripts under scratch/ if the scene changes.
+# execute/DIAGNOSIS.md; regenerate with scripts under execute/diagnostics/ if the scene changes.
 OSC_TRANSLATION_SCALE = 0.05
 MEASURED_STEADY_GAIN = 0.254  # mean of 9 free-space sweeps; per-case spread <0.01
 SUCCESS_QPOS_THRESHOLD = -0.14
@@ -23,50 +23,57 @@ MIDDLE_HANDLE_POS = np.array([0.0424, -0.1353, 1.0154])
 
 
 class RecordingRobot:
-    """Minimal stand-in that records the normalized actions it receives."""
+    """Test plant with the diagnosed lag, exercised through production feedback."""
 
     gripper_command = -1.0
+    success = False
+    done = False
 
-    def __init__(self):
+    def __init__(self, output):
         self.calls = []
+        self.output = output
+        self.position = np.zeros(3)
+        self.steps = 0
+        self.gain = MEASURED_STEADY_GAIN
 
-    def step(self, action):
+    def pose(self):
+        return self.position.copy(), np.eye(3)
+
+    def _advance(self, action):
         self.calls.append(list(action))
-        self.gripper_command = action[-1]
+        self.position += np.asarray(action[:3]) * OSC_TRANSLATION_SCALE * self.gain
+        self.steps += 1
+
+    def observe(self):
         return {"success": False, "done": False}
 
 
 def make_body(tmp_path):
-    body = LiberoEmbodiment(tmp_path)
-    body.robot = RecordingRobot()
+    body = LiberoEmbodiment(tmp_path, control="xyz")
+    body.robot = RecordingRobot(tmp_path)
     body.observation = lambda raw: Observation()
     return body
 
 
-def test_adapter_maps_requested_metres_open_loop_by_the_osc_scale(tmp_path):
-    """The adapter divides by 0.05, so it assumes a command completes in one step."""
+def test_feedback_corrects_the_diagnosed_motion_shortfall(tmp_path):
     body = make_body(tmp_path)
     body.step(Action(np.array([0.01, 0.0, 0.0, 0.0])))
-    assert body.robot.calls[-1][0] == pytest.approx(0.01 / OSC_TRANSLATION_SCALE)
+    assert body.robot.position[0] == pytest.approx(0.01, abs=0.001)
+    assert len(body.robot.calls) > 1
 
 
-def test_open_loop_mapping_under_delivers_by_the_measured_gain(tmp_path):
-    """A 1 cm request yields ~2.5 mm of real motion, which is the reported symptom.
-
-    This is the arithmetic consequence of the measured steady-state gain; it is
-    what makes the agent's requested displacements land roughly a quarter short.
-    """
+def test_blocked_motion_stops_without_claiming_arrival(tmp_path):
     body = make_body(tmp_path)
-    requested = 0.01
-    body.step(Action(np.array([requested, 0.0, 0.0, 0.0])))
-    normalized = body.robot.calls[-1][0]
-    expected = normalized * OSC_TRANSLATION_SCALE * MEASURED_STEADY_GAIN
-    assert expected == pytest.approx(0.00254, abs=5e-5)
-    assert expected < requested / 3
+    body.robot.gain = 0.0
+    result = body.step(Action(np.array([0.01, 0.0, 0.0, 0.0])))
+    assert result.info["stop_reason"] == "stalled"
+    assert len(body.robot.calls) <= 30
+    assert not body.last_motion["reached"]
+    assert not result.terminated
 
 
 def test_inspect_chunk_limit_caps_each_axis_at_one_centimetre():
-    """Inspect splits move_by into <=1 cm chunks, so each chunk is small and lossy."""
+    """Inspect splits move_by into <=1 cm chunks, before feedback executes each waypoint."""
     assert LIMITS[0] == LIMITS[1] == LIMITS[2] == 0.01
     assert LIMITS[3] == 1.0
 
@@ -91,7 +98,7 @@ def test_gripper_command_sign_and_persistence(tmp_path):
     assert body.robot.calls[-1][-1] == -1.0
 
 
-def test_adapter_pins_all_rotation_to_zero(tmp_path):
+def test_xyz_mode_holds_rotation(tmp_path):
     """Fixed wrist orientation is the adapter's deliberate restriction."""
     body = make_body(tmp_path)
     body.step(Action(np.array([0.01, 0.01, 0.01, 1.0])))
@@ -100,7 +107,7 @@ def test_adapter_pins_all_rotation_to_zero(tmp_path):
 
 def test_actions_beyond_the_declared_bounds_are_rejected(tmp_path):
     body = make_body(tmp_path)
-    with pytest.raises(ValueError, match="exceeds declared per-step bounds"):
+    with pytest.raises(ValueError, match="exceeds declared bounds"):
         body.step(Action(np.array([0.02, 0.0, 0.0, 0.0])))
 
 
@@ -112,8 +119,13 @@ def test_success_threshold_and_handle_geometry_match_the_diagnosis(tmp_path):
     robot = None
     try:
         robot = Robot(
-            suite="libero_goal", task_id=0, init_state_id=0, seed=0,
-            max_steps=5, output=str(tmp_path / "scene"), video=False,
+            suite="libero_goal",
+            task_id=0,
+            init_state_id=0,
+            seed=0,
+            max_steps=5,
+            output=str(tmp_path / "scene"),
+            video=False,
             privileged=True,
         )
     except Exception as error:  # pragma: no cover - no usable renderer
@@ -138,9 +150,9 @@ def test_success_threshold_and_handle_geometry_match_the_diagnosis(tmp_path):
         data.qpos[address] = 0.0
         sim.forward()
         handles = [
-            g for g in range(model.ngeom)
-            if (model.geom_id2name(g) or "") in
-            ("wooden_cabinet_1_g28", "wooden_cabinet_1_g29")
+            g
+            for g in range(model.ngeom)
+            if (model.geom_id2name(g) or "") in ("wooden_cabinet_1_g28", "wooden_cabinet_1_g29")
         ]
         measured = np.mean([data.geom_xpos[g] for g in handles], axis=0)
         np.testing.assert_allclose(measured, MIDDLE_HANDLE_POS, atol=2e-3)
